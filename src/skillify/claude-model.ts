@@ -36,6 +36,10 @@ export function claudeModel(model: string, opts: { timeoutMs?: number } = {}): M
     const child = spawn(findAgentBin("claude_code"), args, {
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, HIVEMIND_CAPTURE: "false", HIVEMIND_WIKI_WORKER: "1" },
+      // CREATE_NO_WINDOW: the skillopt engine's judge/proposer steps run inside
+      // the detached, console-less skillopt/mine-local worker, so without it
+      // Windows pops a visible console window for the claude child. No-op on POSIX.
+      windowsHide: true,
     });
     let out = "";
     let err = "";
