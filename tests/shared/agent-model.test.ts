@@ -4,9 +4,9 @@ import { agentModel, detectScorerAgent } from "../../src/skillify/agent-model.js
 
 /** A fake child process that emits `stdout` then closes with `code`, and records argv. */
 function fakeSpawn(stdout: string, code = 0) {
-  const calls: Array<{ bin: string; args: string[]; env: Record<string, unknown> }> = [];
+  const calls: Array<{ bin: string; args: string[]; env: Record<string, unknown>; opts: Record<string, unknown> }> = [];
   const spawnImpl = (bin: string, args: string[], opts: Record<string, unknown>) => {
-    calls.push({ bin, args, env: (opts.env as Record<string, unknown>) ?? {} });
+    calls.push({ bin, args, env: (opts.env as Record<string, unknown>) ?? {}, opts });
     const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: () => void };
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -32,6 +32,8 @@ describe("agentModel — per-agent no-tools dispatch", () => {
     // isolation env always set
     expect(calls[0].env.HIVEMIND_CAPTURE).toBe("false");
     expect(calls[0].env.HIVEMIND_WIKI_WORKER).toBe("1");
+    // no console window on Windows: the scorer runs inside a detached worker
+    expect(calls[0].opts.windowsHide).toBe(true);
   });
 
   it("claude_code proposer defaults to a capable model (sonnet)", async () => {
