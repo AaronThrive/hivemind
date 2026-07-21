@@ -206,4 +206,27 @@ describe("windowsHide — no visible console window for the summarizer CLI", () 
     setPlatform("linux");
     expect(buildTrailingPromptInvocation("/usr/local/bin/codex", FLAGS, "P").options.windowsHide).toBe(true);
   });
+
+  // buildStdinPromptInvocation feeds whole-file prompts over stdin for the doc
+  // REFRESH/GENERATE path (refresh-llm.ts runHostPrompt execFileSyncs it), so
+  // it is another inner summarizer-CLI spawn that must not pop a console window.
+  it("buildStdinPromptInvocation sets windowsHide on the .cmd (shell) branch", () => {
+    setPlatform("win32");
+    expect(buildStdinPromptInvocation("C:\\npm\\codex.cmd", ["-"], "P").options.windowsHide).toBe(true);
+    expect(buildStdinPromptInvocation("C:\\npm\\codex.cmd", ["-"], "P").options.shell).toBe(true);
+  });
+
+  it("buildStdinPromptInvocation sets windowsHide on the .exe / Unix branch", () => {
+    setPlatform("win32");
+    expect(buildStdinPromptInvocation("C:\\pf\\codex.exe", ["-"], "P").options.windowsHide).toBe(true);
+    setPlatform("linux");
+    expect(buildStdinPromptInvocation("/usr/local/bin/codex", ["-"], "P").options.windowsHide).toBe(true);
+  });
+
+  it("buildClaudeStdinInvocation inherits windowsHide from the stdin builder", () => {
+    setPlatform("win32");
+    expect(buildClaudeStdinInvocation("C:\\npm\\claude.cmd", "P").options.windowsHide).toBe(true);
+    setPlatform("linux");
+    expect(buildClaudeStdinInvocation("/usr/local/bin/claude", "P").options.windowsHide).toBe(true);
+  });
 });
