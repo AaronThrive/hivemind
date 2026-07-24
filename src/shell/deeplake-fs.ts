@@ -8,6 +8,7 @@ import type {
   FileContent, BufferEncoding,
 } from "just-bash";
 import { normalizeContent, emptySessionBodyNotice } from "./grep-core.js";
+import { readSessionEventCache } from "../hooks/session-event-cache.js";
 import { EmbedClient } from "../embeddings/client.js";
 import { embeddingSqlLiteral } from "../embeddings/sql.js";
 import { embeddingsDisabled } from "../embeddings/disable.js";
@@ -90,6 +91,20 @@ function joinSessionMessages(path: string, messages: unknown[]): string {
 
 function fsErr(code: string, msg: string, path: string): Error {
   return Object.assign(new Error(`${code}: ${msg}, '${path}'`), { code });
+}
+
+// Recover the bare capture sessionId from a VFS session path so a whole-session
+// read can hit the local event cache. Path shape (see buildSessionPath):
+//   /sessions/<user>/<user>_<org>_<ws>_<sessionId>.jsonl
+// The sessionId is a UUID (no underscores), so it is the last `_`-delimited
+// segment of the filename stem — recoverable even when user/org/ws contain
+// underscores. A non-matching path yields a value that simply misses the cache
+// (→ DB fallback), so this is best-effort and never load-bearing.
+function sessionIdFromVfsPath(p: string): string | null {
+  const file = p.split("/").pop() ?? "";
+  if (!file.endsWith(".jsonl")) return null;
+  const sid = file.slice(0, -".jsonl".length).split("_").pop() ?? "";
+  return sid.length > 0 ? sid : null;
 }
 
 // ── types ─────────────────────────────────────────────────────────────────────
@@ -708,6 +723,33 @@ export class DeeplakeFs implements IFileSystem {
 
   // ── IFileSystem: reads ────────────────────────────────────────────────────
 
+  /**
+   * Load a session's message rows for a whole-file read.
+   *
+   * Prefers the local per-session event cache the capture hook appends to
+   * (row-for-row identical to the sessions-table `message` column) so a re-read
+   * of a fat "mega-session" costs a few ms + zero backend load instead of
+   * re-materializing the entire `message` column (tens of MB, multi-second cold
+   * on the backend). The cache is a strict optimization: on any miss — session
+   * captured on another machine, cache disabled/pruned, or unreadable — we fall
+   * back to the full ordered DB read, which stays the source of truth. This
+   * mirrors the wiki-worker's cache-first strategy (see session-event-cache.ts);
+   * the difference is the VFS needs the WHOLE session (cat/grep), so the DB
+   * fallback stays the unbounded `ORDER BY creation_date ASC` read.
+   */
+  private async loadSessionMessages(p: string): Promise<unknown[]> {
+    const sid = sessionIdFromVfsPath(p);
+    if (sid) {
+      const cached = readSessionEventCache(sid);
+      if (cached && cached.length > 0) return cached;
+    }
+    if (!this.sessionsTable) return [];
+    const rows = await this.client.query(
+      `SELECT message FROM "${this.sessionsTable}" WHERE path = '${esc(p)}' ORDER BY creation_date ASC`
+    );
+    return rows.map((row) => row["message"]);
+  }
+
   async readFileBuffer(path: string): Promise<Uint8Array> {
     const p = normPath(path);
     if (this.dirs.has(p) && !this.files.has(p)) throw fsErr("EISDIR", "illegal operation on a directory", p);
@@ -721,14 +763,12 @@ export class DeeplakeFs implements IFileSystem {
     const pend = this.pending.get(p);
     if (pend) { const buf = Buffer.from(pend.contentText, "utf-8"); this.files.set(p, buf); return buf; }
 
-    // 3. Session files: concatenate rows from sessions table
+    // 3. Session files: local event cache first, then full DB read.
     if (this.sessionPaths.has(p) && this.sessionsTable) {
-      const rows = await this.client.query(
-        `SELECT message FROM "${this.sessionsTable}" WHERE path = '${esc(p)}' ORDER BY creation_date ASC`
-      );
-      if (rows.length === 0) throw fsErr("ENOENT", "no such file or directory", p);
-      const text = joinSessionMessages(p, rows.map((row) => row["message"]));
-      const buf = Buffer.from(text || emptySessionBodyNotice(rows.length), "utf-8");
+      const messages = await this.loadSessionMessages(p);
+      if (messages.length === 0) throw fsErr("ENOENT", "no such file or directory", p);
+      const text = joinSessionMessages(p, messages) || emptySessionBodyNotice(messages.length);
+      const buf = Buffer.from(text, "utf-8");
       this.files.set(p, buf);
       return buf;
     }
@@ -789,13 +829,11 @@ export class DeeplakeFs implements IFileSystem {
     const pend = this.pending.get(p);
     if (pend) return pend.contentText;
 
-    // Session files: concatenate rows from sessions table, ordered by creation_date
+    // Session files: local event cache first, then full DB read.
     if (this.sessionPaths.has(p) && this.sessionsTable) {
-      const rows = await this.client.query(
-        `SELECT message FROM "${this.sessionsTable}" WHERE path = '${esc(p)}' ORDER BY creation_date ASC`
-      );
-      if (rows.length === 0) throw fsErr("ENOENT", "no such file or directory", p);
-      const text = joinSessionMessages(p, rows.map((row) => row["message"])) || emptySessionBodyNotice(rows.length);
+      const messages = await this.loadSessionMessages(p);
+      if (messages.length === 0) throw fsErr("ENOENT", "no such file or directory", p);
+      const text = joinSessionMessages(p, messages) || emptySessionBodyNotice(messages.length);
       const buf = Buffer.from(text, "utf-8");
       this.files.set(p, buf);
       return text;
