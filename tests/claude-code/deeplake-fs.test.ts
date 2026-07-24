@@ -4,6 +4,13 @@ vi.mock("../../src/docs/embed.js", () => ({
   makeDocEmbedder: () => async () => null,
   makeQueryEmbedder: () => async () => null,
 }));
+// Local session event cache: default to a miss (null) so every existing test
+// exercises the DB read path unchanged. Individual tests override the return
+// value to exercise the cache-first path.
+const readSessionEventCacheMock = vi.fn<(sessionId: string) => string[] | null>(() => null);
+vi.mock("../../src/hooks/session-event-cache.js", () => ({
+  readSessionEventCache: (sessionId: string) => readSessionEventCacheMock(sessionId),
+}));
 import { DeeplakeFs, guessMime } from "../../src/shell/deeplake-fs.js";
 
 // ── Mock ManagedClient ────────────────────────────────────────────────────────
@@ -854,6 +861,124 @@ describe("readFile: session bodies", () => {
     const text = await fs.readFile(path);
 
     expect(text).toBe("[user] hello\n[assistant] hi");
+  });
+});
+
+// ── Session reads: local event cache is preferred over the fat DB read ───────
+describe("readFile: session local-cache-first", () => {
+  const SID = "019e2d5c-fec2-72d1-81f8-4edf525479b8";
+  // buildSessionPath shape: /sessions/<user>/<user>_<org>_<ws>_<sessionId>.jsonl
+  const PATH = `/sessions/ivo/ivo_Alka_default_${SID}.jsonl`;
+
+  // A client that knows PATH as a session and, on the fat `SELECT message`
+  // read, returns `dbMessages`. Tracks whether that fat read was issued.
+  function makeFs(dbMessages: unknown[]) {
+    let fatRead = 0;
+    const client = {
+      ensureTable: vi.fn().mockResolvedValue(undefined),
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("SELECT path, MAX(size_bytes) as total_size")) {
+          return [{ path: PATH, total_size: 4096 }];
+        }
+        if (sql.includes("SELECT message FROM")) {
+          fatRead++;
+          return dbMessages.map((message) => ({ message }));
+        }
+        return [];
+      }),
+    };
+    return { client, fatRead: () => fatRead };
+  }
+
+  beforeEach(() => {
+    readSessionEventCacheMock.mockReset();
+    readSessionEventCacheMock.mockReturnValue(null);
+  });
+
+  it("serves a session from the local cache without hitting the fat DB read", async () => {
+    readSessionEventCacheMock.mockReturnValue([
+      "{\"type\":\"user_message\",\"content\":\"hello\"}",
+      "{\"type\":\"assistant_message\",\"content\":\"hi\"}",
+    ]);
+    const { client, fatRead } = makeFs([/* DB should never be consulted */]);
+    const fs = await DeeplakeFs.create(client as never, "memory", "/", "sessions");
+
+    const text = await fs.readFile(PATH);
+
+    expect(readSessionEventCacheMock).toHaveBeenCalledWith(SID);
+    expect(text).toBe("[user] hello\n[assistant] hi");
+    expect(fatRead()).toBe(0); // no `SELECT message` fat read
+  });
+
+  it("produces identical content from cache lines and from DB rows", async () => {
+    const events = [
+      "{\"type\":\"user_message\",\"content\":\"hello\"}",
+      "{\"type\":\"assistant_message\",\"content\":\"hi\"}",
+    ];
+    // DB path (cache miss)
+    const a = makeFs(events);
+    const fsDb = await DeeplakeFs.create(a.client as never, "memory", "/", "sessions");
+    const fromDb = await fsDb.readFile(PATH);
+    // Cache path (same rows served locally)
+    readSessionEventCacheMock.mockReturnValue(events);
+    const b = makeFs([]);
+    const fsCache = await DeeplakeFs.create(b.client as never, "memory", "/", "sessions");
+    const fromCache = await fsCache.readFile(PATH);
+
+    expect(fromCache).toBe(fromDb);
+    expect(a.fatRead()).toBe(1);
+    expect(b.fatRead()).toBe(0);
+  });
+
+  it("falls back to the DB read when the cache misses (null)", async () => {
+    readSessionEventCacheMock.mockReturnValue(null);
+    const { client, fatRead } = makeFs(["{\"type\":\"user_message\",\"content\":\"bye\"}"]);
+    const fs = await DeeplakeFs.create(client as never, "memory", "/", "sessions");
+
+    const text = await fs.readFile(PATH);
+
+    expect(text).toBe("[user] bye");
+    expect(fatRead()).toBe(1);
+  });
+
+  it("falls back to the DB read when the cache is present but empty", async () => {
+    readSessionEventCacheMock.mockReturnValue([]);
+    const { client, fatRead } = makeFs(["{\"type\":\"user_message\",\"content\":\"bye\"}"]);
+    const fs = await DeeplakeFs.create(client as never, "memory", "/", "sessions");
+
+    await fs.readFile(PATH);
+
+    expect(fatRead()).toBe(1);
+  });
+
+  it("readFileBuffer also prefers the local cache", async () => {
+    readSessionEventCacheMock.mockReturnValue(["{\"type\":\"user_message\",\"content\":\"hello\"}"]);
+    const { client, fatRead } = makeFs([]);
+    const fs = await DeeplakeFs.create(client as never, "memory", "/", "sessions");
+
+    const buf = await fs.readFileBuffer(PATH);
+
+    expect(Buffer.from(buf).toString("utf-8")).toBe("[user] hello");
+    expect(fatRead()).toBe(0);
+  });
+
+  it("recovers the sessionId even when user/org/workspace contain underscores", async () => {
+    const path = `/sessions/my_user/my_user_my_org_my_ws_${SID}.jsonl`;
+    const client = {
+      ensureTable: vi.fn().mockResolvedValue(undefined),
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("SELECT path, MAX(size_bytes) as total_size")) {
+          return [{ path, total_size: 10 }];
+        }
+        return [];
+      }),
+    };
+    readSessionEventCacheMock.mockReturnValue(["{\"type\":\"user_message\",\"content\":\"hi\"}"]);
+    const fs = await DeeplakeFs.create(client as never, "memory", "/", "sessions");
+
+    await fs.readFile(path);
+
+    expect(readSessionEventCacheMock).toHaveBeenCalledWith(SID);
   });
 });
 
