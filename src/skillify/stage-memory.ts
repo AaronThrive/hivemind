@@ -95,6 +95,11 @@ export interface ClaudeSpawnPlan {
   shell: boolean;
   /** Prompt to write to stdin, or null when it's passed as a positional arg. */
   stdinInput: string | null;
+  /**
+   * CREATE_NO_WINDOW: this worker is detached and console-less, so without it
+   * Windows pops a visible console window for the claude child. No-op on POSIX.
+   */
+  windowsHide: boolean;
 }
 
 /**
@@ -115,6 +120,7 @@ export function planClaudeSpawn(inv: ReturnType<typeof buildClaudeInvocation>): 
     stdio: [stdinInput !== null ? "pipe" : "ignore", "ignore", "ignore"],
     shell,
     stdinInput,
+    windowsHide: inv.options.windowsHide === true,
   };
 }
 
@@ -132,6 +138,7 @@ function runClaude(claudeBin: string, prompt: string, timeoutMs: number): Promis
       env: { ...process.env, HIVEMIND_WIKI_WORKER: "1", HIVEMIND_CAPTURE: "false" },
       timeout: timeoutMs,
       shell: plan.shell,
+      windowsHide: plan.windowsHide,
     });
     child.on("error", () => resolve(false));
     if (plan.stdinInput !== null) child.stdin?.end(plan.stdinInput);

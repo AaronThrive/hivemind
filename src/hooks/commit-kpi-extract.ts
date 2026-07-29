@@ -122,6 +122,9 @@ export async function tryCommitKpiExtract(
       cwd,
       detached: true,
       stdio: "ignore",
+      // CREATE_NO_WINDOW: detached summarizer CLI spawn — without it Windows
+      // pops a visible console window for the claude/codex child. No-op on POSIX.
+      windowsHide: true,
       env: process.env,
     });
     child.unref();

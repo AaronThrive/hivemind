@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runGate, buildArgs, findAgentBin, type Agent } from "../../src/skillify/gate-runner.js";
@@ -30,6 +30,19 @@ describe.skipIf(process.platform === "win32")("runGate spawn (POSIX)", () => {
     const r = runGate({ agent: "claude_code", prompt: "p", bin });
     expect(r.errored).toBe(true);
     expect(r.errorMessage).toMatch(/CLI failed/);
+  });
+});
+
+describe("gate-runner spawn options", () => {
+  it("passes windowsHide so the gate CLI never pops a console window on Windows", () => {
+    // The skillify worker is detached and console-less; without windowsHide
+    // on the inner CLI spawn, Windows allocates a visible console window.
+    // Source-level guard because the dispatch tests exec a real /usr/bin/echo
+    // and can't observe the options object.
+    // Scoped to the runChildProcess call ([^)]* = no closing paren in
+    // between) so the guard fails if the option drifts out of the spawn.
+    const src = readFileSync(join(process.cwd(), "src/skillify/gate-runner.ts"), "utf-8");
+    expect(src).toMatch(/runChildProcess\([^)]*windowsHide:\s*true/);
   });
 });
 

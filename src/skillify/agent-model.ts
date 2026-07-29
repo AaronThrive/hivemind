@@ -146,6 +146,7 @@ export function agentModel(opts: {
     const child = spawnFn(bin, args, {
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...env, HIVEMIND_CAPTURE: "false", HIVEMIND_WIKI_WORKER: "1" },
+      windowsHide: true,
     });
     let out = "";
     let err = "";

@@ -131,6 +131,10 @@ function runAdvisorGate(prompt: string, claudeBin: string): Promise<string> {
     ], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, HIVEMIND_WIKI_WORKER: "1", HIVEMIND_CAPTURE: "false" },
+      // CREATE_NO_WINDOW: this runs inside the detached, console-less mine-local
+      // worker, so without it Windows pops a visible console window for the
+      // claude child. No-op on POSIX.
+      windowsHide: true,
     });
     let stdout = "";
     let stderr = "";

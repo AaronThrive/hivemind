@@ -294,6 +294,9 @@ async function main(): Promise<void> {
         "--ignore-user-config",
       ], {
         stdio: ["ignore", "pipe", "pipe"],
+        // Suppress the visible console window Windows would otherwise pop for
+        // a child of this console-less detached worker. No-op on POSIX.
+        windowsHide: true,
         timeout: 120_000,
         // hermes streams to stdout, which execFileSync buffers. The Node
         // default (1 MB) overflows to ENOBUFS on a verbose run, killing the
