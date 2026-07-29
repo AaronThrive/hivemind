@@ -643,3 +643,87 @@ describe("cross-process concurrency", () => {
     mod.releaseLock(sid);
   }, 30_000);
 });
+
+/**
+ * Regression cover for issue #331: a summary run that FAILS never reaches
+ * finalizeSummary, so lastSummaryCount stays 0. Before the back-off, that made
+ * shouldTrigger's first-summary clause true on every subsequent captured
+ * event — one full `claude -p` process per tool call for the rest of the
+ * session (the "flashing console window every 5-6s" on Windows).
+ */
+describe("failed-run back-off (issue #331)", () => {
+  const cfg = { everyNMessages: 50, everyHours: 2 };
+
+  it("retryBackoffMs doubles per failure and caps at 30 minutes", () => {
+    expect(mod.retryBackoffMs(0)).toBe(0);
+    expect(mod.retryBackoffMs(1)).toBe(60_000);
+    expect(mod.retryBackoffMs(2)).toBe(2 * 60_000);
+    expect(mod.retryBackoffMs(3)).toBe(4 * 60_000);
+    expect(mod.retryBackoffMs(5)).toBe(16 * 60_000);
+    expect(mod.retryBackoffMs(6)).toBe(30 * 60_000);
+    expect(mod.retryBackoffMs(99)).toBe(30 * 60_000);
+  });
+
+  it("suppresses the retry while the back-off window is open", () => {
+    const now = Date.now();
+    expect(mod.shouldTrigger(
+      { lastSummaryAt: now, lastSummaryCount: 0, totalCount: 11, lastAttemptAt: now - 30_000, attemptsSinceSuccess: 1 },
+      cfg, now,
+    )).toBe(false);
+  });
+
+  it("allows the retry once the back-off window has elapsed", () => {
+    const now = Date.now();
+    expect(mod.shouldTrigger(
+      { lastSummaryAt: now, lastSummaryCount: 0, totalCount: 11, lastAttemptAt: now - 61_000, attemptsSinceSuccess: 1 },
+      cfg, now,
+    )).toBe(true);
+  });
+
+  it("does not change behavior for a session with no failed attempts", () => {
+    const now = Date.now();
+    expect(mod.shouldTrigger(
+      { lastSummaryAt: now, lastSummaryCount: 0, totalCount: 10, lastAttemptAt: now - 1000, attemptsSinceSuccess: 0 },
+      cfg, now,
+    )).toBe(true);
+  });
+
+  it("collapses a 30-event failing session from 21 spawns down to 1", () => {
+    // Simulate the real loop: every event bumps the counter, and every run we
+    // trigger fails (never calls finalizeSummary, only markSummaryAttempt).
+    const sid = newSessionId();
+    let spawns = 0;
+    for (let i = 0; i < 30; i++) {
+      const state = mod.bumpTotalCount(sid);
+      if (!mod.shouldTrigger(state, cfg)) continue;
+      spawns++;
+      mod.markSummaryAttempt(sid);
+    }
+    expect(spawns).toBe(1);
+  });
+
+  it("markSummaryAttempt stamps the attempt without advancing lastSummaryCount", () => {
+    const sid = newSessionId();
+    for (let i = 0; i < 12; i++) mod.bumpTotalCount(sid);
+    const before = Date.now();
+    mod.markSummaryAttempt(sid);
+    const s = JSON.parse(readFileSync(mod.statePath(sid), "utf-8"));
+    expect(s.attemptsSinceSuccess).toBe(1);
+    expect(s.lastAttemptAt).toBeGreaterThanOrEqual(before);
+    expect(s.lastSummaryCount).toBe(0);
+    expect(s.totalCount).toBe(12);
+    mod.markSummaryAttempt(sid);
+    expect(JSON.parse(readFileSync(mod.statePath(sid), "utf-8")).attemptsSinceSuccess).toBe(2);
+  });
+
+  it("finalizeSummary clears the failure counter so the next run is not delayed", () => {
+    const sid = newSessionId();
+    for (let i = 0; i < 12; i++) mod.bumpTotalCount(sid);
+    mod.markSummaryAttempt(sid);
+    mod.markSummaryAttempt(sid);
+    mod.finalizeSummary(sid, 12);
+    const s = JSON.parse(readFileSync(mod.statePath(sid), "utf-8"));
+    expect(s.attemptsSinceSuccess).toBe(0);
+    expect(mod.shouldTrigger(s, cfg, Date.now() + 3 * 3600 * 1000)).toBe(false);
+  });
+});
