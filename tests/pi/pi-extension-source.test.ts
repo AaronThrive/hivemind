@@ -344,12 +344,31 @@ describe("pi extension — failed-summary back-off (issue #331)", () => {
     );
   });
 
-  it("stamps the attempt before spawning the wiki worker", () => {
-    const trigger = PI_SRC.slice(PI_SRC.indexOf("function maybeTriggerPeriodicSummary"));
-    const stampAt = trigger.indexOf("attemptsSinceSuccess: (state.attemptsSinceSuccess ?? 0) + 1");
-    const spawnAt = trigger.indexOf('spawnWikiWorker(creds, sessionId, cwd, "periodic")');
-    expect(stampAt).toBeGreaterThan(-1);
-    expect(spawnAt).toBeGreaterThan(stampAt);
+  it("stamps the attempt after winning the lock, not before", () => {
+    // Stamping in the caller (before tryAcquireSummaryLock) would overwrite a
+    // concurrent worker's finalization with stale counters and would record a
+    // lock-suppressed non-spawn as a failure.
+    const trigger = PI_SRC.slice(
+      PI_SRC.indexOf("function maybeTriggerPeriodicSummary"),
+    );
+    expect(trigger).not.toContain("attemptsSinceSuccess");
+
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    const lockAt = spawn.indexOf("tryAcquireSummaryLock(sessionId)");
+    const stampAt = spawn.indexOf("attemptsSinceSuccess: (fresh.attemptsSinceSuccess ?? 0) + 1");
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(stampAt).toBeGreaterThan(lockAt);
+  });
+
+  it("stamps against freshly-read state, not the trigger-time snapshot", () => {
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    expect(spawn).toContain("const fresh = readSummaryState(sessionId)");
+    expect(spawn).toContain("...fresh,");
+  });
+
+  it("does not back off the final session-shutdown summary", () => {
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    expect(spawn).toContain('if (reason === "periodic")');
   });
 
   it("caps the back-off at 30 minutes, matching summary-state.ts", () => {

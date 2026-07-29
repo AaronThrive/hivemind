@@ -826,6 +826,22 @@ function spawnWikiWorker(
     logHm(`spawnWikiWorker(${reason}): lock held — skipping (a worker is already running)`);
     return;
   }
+  // Stamp the attempt AFTER winning the lock, against freshly-read state
+  // (issue #331). Stamping in the caller — before the lock, using the state
+  // object read at trigger time — could overwrite a concurrent worker's
+  // successful finalization with stale counters, and would record a
+  // lock-suppressed non-spawn as a failed attempt. Periodic only: a final
+  // summary at session shutdown gets no back-off, matching summary-state.ts.
+  if (reason === "periodic") {
+    const fresh = readSummaryState(sessionId);
+    if (fresh) {
+      writeSummaryState(sessionId, {
+        ...fresh,
+        lastAttemptAt: Date.now(),
+        attemptsSinceSuccess: (fresh.attemptsSinceSuccess ?? 0) + 1,
+      });
+    }
+  }
   // tmp dir owned by the worker; it removes it on completion.
   const tmpDir = join(tmpdir(), `deeplake-wiki-${sessionId}-${Date.now()}`);
   try { mkdirSync(tmpDir, { recursive: true }); } catch { /* ignore */ }
@@ -960,13 +976,6 @@ function maybeTriggerPeriodicSummary(creds: Creds, sessionId: string, cwd: strin
   const cfg = loadSummaryConfig();
   if (!shouldTriggerNow(state, cfg)) return;
   logHm(`periodic threshold hit (total=${state.totalCount}, since=${state.totalCount - state.lastSummaryCount}, N=${cfg.everyNMessages}, hours=${cfg.everyHours})`);
-  // Stamp the attempt before spawning so a failing worker backs off rather
-  // than refiring on every captured event (issue #331).
-  writeSummaryState(sessionId, {
-    ...state,
-    lastAttemptAt: Date.now(),
-    attemptsSinceSuccess: (state.attemptsSinceSuccess ?? 0) + 1,
-  });
   spawnWikiWorker(creds, sessionId, cwd, "periodic");
 }
 
