@@ -29,7 +29,13 @@ import { join } from "node:path";
 export function resolveCliBin(cli: string, fallback?: string): string {
   const isWin = process.platform === "win32";
   try {
-    const out = execFileSync(isWin ? "where" : "which", [cli], { encoding: "utf-8" });
+    const out = execFileSync(isWin ? "where" : "which", [cli], {
+      encoding: "utf-8",
+      // CREATE_NO_WINDOW. Reached from detached background workers, which
+      // have no console to inherit, so where.exe would otherwise allocate a
+      // visible one. No-op on POSIX.
+      windowsHide: true,
+    });
     const matches = out
       .split(/\r?\n/)
       .map((line) => line.trim())

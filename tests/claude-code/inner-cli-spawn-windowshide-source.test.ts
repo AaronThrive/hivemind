@@ -37,6 +37,22 @@ describe("inner CLI spawn windowsHide — source guards", () => {
     expect(src("src/hooks/commit-kpi-extract.ts")).toMatch(/spawn\(\s*cli\.bin[^)]*windowsHide:\s*true/);
   });
 
+  // The helper LOOKUPS, not the CLI spawns. These run `where.exe` on Windows
+  // from inside detached workers that have no console to inherit, so each one
+  // allocates its own visible window without CREATE_NO_WINDOW — the same flash
+  // the CLI spawns produced, one layer earlier.
+  it("resolveCliBin's where/which lookup passes windowsHide", () => {
+    expect(src("src/utils/resolve-cli-bin.ts")).toMatch(
+      /execFileSync\(isWin \? "where" : "which"[^)]*windowsHide:\s*true/,
+    );
+  });
+
+  it("the mine-local worker's hivemind lookup passes windowsHide", () => {
+    expect(src("src/skillify/spawn-mine-local-worker.ts")).toMatch(
+      /execFileSync\(lookup[^)]*windowsHide:\s*true/,
+    );
+  });
+
   it("stage-memory threads windowsHide from the invocation into the spawn plan and spawn call", () => {
     const s = src("src/skillify/stage-memory.ts");
     // plan carries it through from the builder's options...

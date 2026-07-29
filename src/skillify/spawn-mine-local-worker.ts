@@ -85,6 +85,9 @@ export function findHivemindLauncher(): HivemindLauncher | null {
     const out = execFileSync(lookup, ["hivemind"], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
+      // CREATE_NO_WINDOW: same reason as resolveCliBin — this runs from a
+      // detached worker with no console to inherit. No-op on POSIX.
+      windowsHide: true,
     });
     const bin = out.trim();
     return bin ? { kind: "bin", path: bin } : null;
