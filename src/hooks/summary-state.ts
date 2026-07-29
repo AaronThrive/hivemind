@@ -23,6 +23,16 @@ export interface SummaryState {
   lastSummaryAt: number;
   lastSummaryCount: number;
   totalCount: number;
+  /**
+   * Epoch ms of the last summary run we *started*, successful or not.
+   * Distinct from lastSummaryAt, which only advances on success.
+   */
+  lastAttemptAt?: number;
+  /**
+   * Summary runs started since the last successful one. Drives the retry
+   * back-off in shouldTrigger; reset to 0 by finalizeSummary.
+   */
+  attemptsSinceSuccess?: number;
 }
 
 const STATE_DIR = join(homedir(), ".claude", "hooks", "summary-state");
@@ -291,8 +301,46 @@ export function finalizeSummary(sessionId: string, jsonlLines: number): void {
       lastSummaryAt: Date.now(),
       lastSummaryCount: jsonlLines,
       totalCount: Math.max(prev?.totalCount ?? 0, jsonlLines),
+      lastAttemptAt: prev?.lastAttemptAt,
+      attemptsSinceSuccess: 0,
     });
   });
+}
+
+/**
+ * Record that a summary run is being STARTED. Called by the periodic trigger
+ * immediately after it wins the spawn lock, before the worker is spawned.
+ *
+ * Without this, a summary run that fails (claude bin unresolvable, non-zero
+ * exit, no summary file produced) never advances any counter: the worker
+ * returns early without calling finalizeSummary and releases the lock in its
+ * `finally`, so `lastSummaryCount` stays 0 and shouldTrigger's
+ * first-summary clause keeps firing on EVERY captured event. The observed
+ * result is one full `claude -p` process per tool call for the rest of the
+ * session (issue #331).
+ */
+export function markSummaryAttempt(sessionId: string): void {
+  withRmwLock(sessionId, () => {
+    const prev = readState(sessionId);
+    writeState(sessionId, {
+      lastSummaryAt: prev?.lastSummaryAt ?? Date.now(),
+      lastSummaryCount: prev?.lastSummaryCount ?? 0,
+      totalCount: prev?.totalCount ?? 0,
+      lastAttemptAt: Date.now(),
+      attemptsSinceSuccess: (prev?.attemptsSinceSuccess ?? 0) + 1,
+    });
+  });
+}
+
+/**
+ * Exponential back-off after failed summary runs: 1, 2, 4, 8, 16 minutes,
+ * capped at 30. A run that succeeds resets the counter via finalizeSummary,
+ * so a healthy session never waits.
+ */
+export function retryBackoffMs(attemptsSinceSuccess: number): number {
+  if (attemptsSinceSuccess <= 0) return 0;
+  const minutes = Math.min(2 ** (attemptsSinceSuccess - 1), 30);
+  return minutes * 60 * 1000;
 }
 
 export interface TriggerConfig {
@@ -313,6 +361,11 @@ const FIRST_SUMMARY_AT = 10;
 
 export function shouldTrigger(state: SummaryState, cfg: TriggerConfig, now = Date.now()): boolean {
   const msgsSince = state.totalCount - state.lastSummaryCount;
+  // A previous run started but never finalized — it failed. Hold off for the
+  // back-off window instead of respawning a full `claude -p` on the next
+  // captured event (issue #331). markSummaryAttempt stamps lastAttemptAt.
+  const attempts = state.attemptsSinceSuccess ?? 0;
+  if (attempts > 0 && now - (state.lastAttemptAt ?? 0) < retryBackoffMs(attempts)) return false;
   if (state.lastSummaryCount === 0 && state.totalCount >= FIRST_SUMMARY_AT) return true;
   if (msgsSince >= cfg.everyNMessages) return true;
   if (msgsSince > 0 && now - state.lastSummaryAt >= cfg.everyHours * 3600 * 1000) return true;
