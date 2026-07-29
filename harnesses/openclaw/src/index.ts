@@ -591,7 +591,9 @@ function detectOpenclawGateAgent(): GateAgent | null {
   ];
   for (const [agent, bin] of candidates) {
     try {
-      realExecFileSync("which", [bin], { stdio: ["ignore", "pipe", "ignore"] });
+      // NOTE: "which" is hardcoded here too — same Windows gap as pi's
+      // launcher lookup, tracked separately.
+      realExecFileSync("which", [bin], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
       return agent;
     } catch { /* not on PATH, try next */ }
   }
@@ -674,6 +676,8 @@ function spawnOpenclawSkillifyWorker(a: OpenclawSpawnArgs): boolean {
     realSpawn(process.execPath, [OPENCLAW_SKILLIFY_WORKER_PATH, configPath], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
       env: { ...inheritedEnv.env, HIVEMIND_SKILLIFY_WORKER: "1", HIVEMIND_CAPTURE: "false" },
     }).unref();
     return true;

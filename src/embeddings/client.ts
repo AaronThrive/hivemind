@@ -371,6 +371,10 @@ export class EmbedClient {
       const child = spawn(process.execPath, [this.daemonEntry], {
         detached: true,
         stdio: "ignore",
+        // SW_HIDE: the daemon is auto-spawned from the backfill path, which
+        // itself runs detached — without this it flashes a console. No-op on
+        // POSIX.
+        windowsHide: true,
         env: process.env,
       });
       child.unref();

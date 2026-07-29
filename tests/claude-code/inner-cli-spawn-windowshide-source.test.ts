@@ -38,9 +38,10 @@ describe("inner CLI spawn windowsHide — source guards", () => {
   });
 
   // The helper LOOKUPS, not the CLI spawns. These run `where.exe` on Windows
-  // from inside detached workers that have no console to inherit, so each one
-  // allocates its own visible window without CREATE_NO_WINDOW — the same flash
-  // the CLI spawns produced, one layer earlier.
+  // on the way to launching a detached worker, so without CREATE_NO_WINDOW
+  // each one allocates its own visible window — the same flash the CLI spawns
+  // produced, one layer earlier. (resolveCliBin is also called from inside
+  // already-detached workers, which have no console to inherit at all.)
   it("resolveCliBin's where/which lookup passes windowsHide", () => {
     expect(src("src/utils/resolve-cli-bin.ts")).toMatch(
       /execFileSync\(isWin \? "where" : "which"[^)]*windowsHide:\s*true/,
@@ -59,5 +60,38 @@ describe("inner CLI spawn windowsHide — source guards", () => {
     expect(s).toMatch(/windowsHide:\s*inv\.options\.windowsHide\s*===\s*true/);
     // ...and the spawn call applies it.
     expect(s).toMatch(/spawn\(\s*plan\.file[^)]*windowsHide:\s*plan\.windowsHide/);
+  });
+});
+
+/**
+ * The detached WORKER launches themselves. `detached: true` maps to
+ * DETACHED_PROCESS, which makes Windows ignore CREATE_NO_WINDOW — but libuv
+ * sets SW_HIDE from `windowsHide` as well, and that still applies, so the
+ * option is not a no-op on these. `spawn-detached.ts` has always paired the
+ * two; these are the launches that were missing it.
+ */
+describe("detached worker spawn windowsHide — source guards", () => {
+  it("mine-local worker launch passes windowsHide", () => {
+    expect(src("src/skillify/spawn-mine-local-worker.ts")).toMatch(/spawn\(cmd,\s*args[^)]*windowsHide:\s*true/);
+  });
+
+  it("backfill-memory worker launch passes windowsHide", () => {
+    expect(src("src/skillify/spawn-backfill-memory-worker.ts")).toMatch(/spawn\(cmd,\s*cmdArgs[^)]*windowsHide:\s*true/);
+  });
+
+  it("the auto-spawned embedding daemon passes windowsHide", () => {
+    expect(src("src/embeddings/client.ts")).toMatch(/spawn\(process\.execPath,\s*\[this\.daemonEntry\][^)]*windowsHide:\s*true/);
+  });
+
+  it("pi's auto-mine launcher lookup and worker launch both pass windowsHide", () => {
+    const pi = src("harnesses/pi/extension-source/hivemind.ts");
+    expect(pi).toMatch(/execFileSync\("which",\s*\["hivemind"\][^)]*windowsHide:\s*true/);
+    expect(pi).toMatch(/spawn\(cmd,\s*args[^)]*windowsHide:\s*true/);
+  });
+
+  it("openclaw's agent lookup and skillify worker launch both pass windowsHide", () => {
+    const oc = src("harnesses/openclaw/src/index.ts");
+    expect(oc).toMatch(/realExecFileSync\("which",\s*\[bin\][^)]*windowsHide:\s*true/);
+    expect(oc).toMatch(/realSpawn\(process\.execPath,\s*\[OPENCLAW_SKILLIFY_WORKER_PATH[^)]*windowsHide:\s*true/);
   });
 });

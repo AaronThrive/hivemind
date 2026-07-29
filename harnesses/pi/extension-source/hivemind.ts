@@ -1126,7 +1126,10 @@ function piMaybeAutoMineLocal(): boolean {
     } catch { /* fall through to which */ }
     if (!launcher) {
       try {
-        const out = execFileSync("which", ["hivemind"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
+        // NOTE: "which" is hardcoded, so this lookup cannot succeed on
+        // Windows at all — tracked separately; windowsHide keeps it from
+        // flashing wherever it does run.
+        const out = execFileSync("which", ["hivemind"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
         const bin = String(out).trim();
         if (bin) launcher = { kind: "bin", path: bin };
       } catch { return false; }
@@ -1150,6 +1153,8 @@ function piMaybeAutoMineLocal(): boolean {
       const child = spawn(cmd, args, {
         detached: true,
         stdio: ["ignore", out, out],
+        // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+        windowsHide: true,
         env: process.env,
       });
       closeSync(out);

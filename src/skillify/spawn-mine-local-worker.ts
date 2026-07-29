@@ -195,6 +195,9 @@ export function maybeAutoMineLocal(opts: AutoMineOptions = {}): AutoMineGuardRep
     const child = spawn(cmd, args, {
       detached: true,
       stdio: ["ignore", out, out],
+      // SW_HIDE: libuv still applies it alongside detached, so the mining
+      // worker never flashes a console. No-op on POSIX.
+      windowsHide: true,
       env: process.env,
     });
     closeSync(out);
