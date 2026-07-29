@@ -328,3 +328,31 @@ describe("pi extension — per-directory .hivemind wiring", () => {
     expect(PI_SRC).toContain("capture is disabled for this directory");
   });
 });
+
+describe("pi extension — failed-summary back-off (issue #331)", () => {
+  it("preserves the attempt fields across a state read/write round-trip", () => {
+    // pi rewrites the WHOLE state object into the same dir the shared
+    // wiki-worker finalizes against. Dropping these on read would strip them
+    // from the file and restore the infinite-refire behavior.
+    expect(PI_SRC).toContain("lastAttemptAt: Number(raw.lastAttemptAt) || 0");
+    expect(PI_SRC).toContain("attemptsSinceSuccess: Number(raw.attemptsSinceSuccess) || 0");
+  });
+
+  it("suppresses the trigger while a failed run's back-off window is open", () => {
+    expect(PI_SRC).toMatch(
+      /if \(attempts > 0 && now - \(state\.lastAttemptAt \?\? 0\) < retryBackoffMs\(attempts\)\) return false;/,
+    );
+  });
+
+  it("stamps the attempt before spawning the wiki worker", () => {
+    const trigger = PI_SRC.slice(PI_SRC.indexOf("function maybeTriggerPeriodicSummary"));
+    const stampAt = trigger.indexOf("attemptsSinceSuccess: (state.attemptsSinceSuccess ?? 0) + 1");
+    const spawnAt = trigger.indexOf('spawnWikiWorker(creds, sessionId, cwd, "periodic")');
+    expect(stampAt).toBeGreaterThan(-1);
+    expect(spawnAt).toBeGreaterThan(stampAt);
+  });
+
+  it("caps the back-off at 30 minutes, matching summary-state.ts", () => {
+    expect(PI_SRC).toContain("Math.min(2 ** (attemptsSinceSuccess - 1), 30) * 60 * 1000");
+  });
+});

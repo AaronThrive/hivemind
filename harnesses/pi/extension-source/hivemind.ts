@@ -652,6 +652,13 @@ interface SummaryState {
   lastSummaryAt: number;
   lastSummaryCount: number;
   totalCount: number;
+  // Mirror of src/hooks/summary-state.ts. A run that fails never calls
+  // finalizeSummary, so without these the first-summary clause below stays
+  // true forever and refires on every captured event (issue #331). They must
+  // also survive a read/write round-trip here, because this file rewrites the
+  // whole state object that the shared worker finalizes against.
+  lastAttemptAt?: number;
+  attemptsSinceSuccess?: number;
 }
 interface SummaryConfig {
   everyNMessages: number;
@@ -688,6 +695,8 @@ function readSummaryState(sessionId: string): SummaryState | null {
       lastSummaryAt: Number(raw.lastSummaryAt) || 0,
       lastSummaryCount: Number(raw.lastSummaryCount) || 0,
       totalCount: Number(raw.totalCount) || 0,
+      lastAttemptAt: Number(raw.lastAttemptAt) || 0,
+      attemptsSinceSuccess: Number(raw.attemptsSinceSuccess) || 0,
     };
   } catch { return null; }
 }
@@ -706,8 +715,18 @@ function bumpCounter(sessionId: string): SummaryState {
   return cur;
 }
 
-function shouldTriggerNow(state: SummaryState, cfg: SummaryConfig): boolean {
+/** Mirror of retryBackoffMs in src/hooks/summary-state.ts: 1..30 minutes. */
+function retryBackoffMs(attemptsSinceSuccess: number): number {
+  if (attemptsSinceSuccess <= 0) return 0;
+  return Math.min(2 ** (attemptsSinceSuccess - 1), 30) * 60 * 1000;
+}
+
+function shouldTriggerNow(state: SummaryState, cfg: SummaryConfig, now = Date.now()): boolean {
   const msgsSince = state.totalCount - state.lastSummaryCount;
+  // A run started but never finalized — it failed. Hold off instead of
+  // respawning the worker on the next captured event (issue #331).
+  const attempts = state.attemptsSinceSuccess ?? 0;
+  if (attempts > 0 && now - (state.lastAttemptAt ?? 0) < retryBackoffMs(attempts)) return false;
   // First-chat trigger: index a fresh session quickly (10 events) instead of
   // waiting until N=50. Mirrors summary-state.ts in CC/codex.
   if (state.lastSummaryCount === 0 && state.totalCount >= FIRST_SUMMARY_AT) return true;
@@ -941,6 +960,13 @@ function maybeTriggerPeriodicSummary(creds: Creds, sessionId: string, cwd: strin
   const cfg = loadSummaryConfig();
   if (!shouldTriggerNow(state, cfg)) return;
   logHm(`periodic threshold hit (total=${state.totalCount}, since=${state.totalCount - state.lastSummaryCount}, N=${cfg.everyNMessages}, hours=${cfg.everyHours})`);
+  // Stamp the attempt before spawning so a failing worker backs off rather
+  // than refiring on every captured event (issue #331).
+  writeSummaryState(sessionId, {
+    ...state,
+    lastAttemptAt: Date.now(),
+    attemptsSinceSuccess: (state.attemptsSinceSuccess ?? 0) + 1,
+  });
   spawnWikiWorker(creds, sessionId, cwd, "periodic");
 }
 
