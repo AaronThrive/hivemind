@@ -375,3 +375,29 @@ describe("pi extension — failed-summary back-off (issue #331)", () => {
     expect(PI_SRC).toContain("Math.min(2 ** (attemptsSinceSuccess - 1), 30) * 60 * 1000");
   });
 });
+
+describe("pi extension — #331 review follow-ups", () => {
+  it("fails closed when the attempt stamp cannot be persisted", () => {
+    // A spawn we cannot record is exactly the bug: the next captured event
+    // refires immediately. Release the lock and skip instead.
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    expect(spawn).toContain("if (!stamped) {");
+    const stampedAt = spawn.indexOf("if (!stamped) {");
+    const releaseAt = spawn.indexOf("releaseSummaryLock(sessionId)", stampedAt);
+    const returnAt = spawn.indexOf("return;", releaseAt);
+    expect(releaseAt).toBeGreaterThan(stampedAt);
+    expect(returnAt).toBeGreaterThan(releaseAt);
+  });
+
+  it("writeSummaryState reports failure rather than swallowing it", () => {
+    expect(PI_SRC).toMatch(/function writeSummaryState\([^)]*\): boolean \{/);
+    expect(PI_SRC).toContain("} catch { return false; }");
+  });
+
+  it("honors the documented HIVEMIND_WIKI_WORKER=1 off switch", () => {
+    // README's Configuration table promises this disables background
+    // summaries; pi previously only checked HIVEMIND_CAPTURE.
+    const trigger = PI_SRC.slice(PI_SRC.indexOf("function maybeTriggerPeriodicSummary"));
+    expect(trigger).toContain('process.env.HIVEMIND_WIKI_WORKER === "1"');
+  });
+});

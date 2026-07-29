@@ -701,11 +701,22 @@ function readSummaryState(sessionId: string): SummaryState | null {
   } catch { return null; }
 }
 
-function writeSummaryState(sessionId: string, state: SummaryState): void {
+/**
+ * Returns false when the state could not be persisted. Most callers treat a
+ * failed write as non-fatal, but the #331 attempt stamp must fail closed: an
+ * unpersisted stamp means the next captured event refires immediately, which
+ * is the bug the back-off exists to prevent.
+ */
+function writeSummaryState(sessionId: string, state: SummaryState): boolean {
   try {
     mkdirSync(SUMMARY_STATE_DIR, { recursive: true });
     writeFileSync(summaryStatePath(sessionId), JSON.stringify(state));
-  } catch { /* non-fatal */ }
+    return true;
+  } catch { return false; }
+}
+
+function releaseSummaryLock(sessionId: string): void {
+  try { unlinkSync(summaryLockPath(sessionId)); } catch { /* already gone */ }
 }
 
 function bumpCounter(sessionId: string): SummaryState {
@@ -834,12 +845,15 @@ function spawnWikiWorker(
   // summary at session shutdown gets no back-off, matching summary-state.ts.
   if (reason === "periodic") {
     const fresh = readSummaryState(sessionId);
-    if (fresh) {
-      writeSummaryState(sessionId, {
-        ...fresh,
-        lastAttemptAt: Date.now(),
-        attemptsSinceSuccess: (fresh.attemptsSinceSuccess ?? 0) + 1,
-      });
+    const stamped = fresh !== null && writeSummaryState(sessionId, {
+      ...fresh,
+      lastAttemptAt: Date.now(),
+      attemptsSinceSuccess: (fresh.attemptsSinceSuccess ?? 0) + 1,
+    });
+    if (!stamped) {
+      logHm(`spawnWikiWorker(${reason}): could not persist the attempt stamp — releasing the lock and skipping (a spawn we cannot record would refire on every event)`);
+      releaseSummaryLock(sessionId);
+      return;
     }
   }
   // tmp dir owned by the worker; it removes it on completion.
@@ -972,6 +986,9 @@ function spawnPiSkillifyWorker(creds: Creds, sessionId: string, cwd: string): vo
 
 function maybeTriggerPeriodicSummary(creds: Creds, sessionId: string, cwd: string): void {
   if (process.env.HIVEMIND_CAPTURE === "false") return;
+  // Documented off switch for background summaries (README Configuration).
+  // Also the recursion guard the worker itself sets.
+  if (process.env.HIVEMIND_WIKI_WORKER === "1") return;
   const state = bumpCounter(sessionId);
   const cfg = loadSummaryConfig();
   if (!shouldTriggerNow(state, cfg)) return;
