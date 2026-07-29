@@ -155,6 +155,8 @@ function spawnWorker(sessionId: string, skill: string, reaction: string, toolUse
     const child = spawn(process.execPath, [entry], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
       env: {
         ...process.env,
         [SKILLOPT_ENV.WORKER]: "1",

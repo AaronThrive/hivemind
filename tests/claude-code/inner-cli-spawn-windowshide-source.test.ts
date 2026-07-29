@@ -85,13 +85,69 @@ describe("detached worker spawn windowsHide — source guards", () => {
 
   it("pi's auto-mine launcher lookup and worker launch both pass windowsHide", () => {
     const pi = src("harnesses/pi/extension-source/hivemind.ts");
-    expect(pi).toMatch(/execFileSync\("which",\s*\["hivemind"\][^)]*windowsHide:\s*true/);
+    expect(pi).toMatch(/execFileSync\(lookup,\s*\["hivemind"\][^)]*windowsHide:\s*true/);
     expect(pi).toMatch(/spawn\(cmd,\s*args[^)]*windowsHide:\s*true/);
   });
 
   it("openclaw's agent lookup and skillify worker launch both pass windowsHide", () => {
     const oc = src("harnesses/openclaw/src/index.ts");
-    expect(oc).toMatch(/realExecFileSync\("which",\s*\[bin\][^)]*windowsHide:\s*true/);
+    expect(oc).toMatch(/realExecFileSync\(lookup,\s*\[bin\][^)]*windowsHide:\s*true/);
     expect(oc).toMatch(/realSpawn\(process\.execPath,\s*\[OPENCLAW_SKILLIFY_WORKER_PATH[^)]*windowsHide:\s*true/);
+  });
+});
+
+/**
+ * Hook-triggered detached launches. These fire during an ordinary session
+ * (session start, stop, skill reactions, embedding warm-up), so a missing
+ * SW_HIDE here is the same user-visible flash #331 reported, from a
+ * different worker.
+ */
+describe("hook-triggered detached launch windowsHide — source guards", () => {
+  const CASES: Array<[string, string, RegExp]> = [
+    ["shared skillopt worker", "src/skillify/skillopt-trigger.ts", /spawn\(process\.execPath,\s*\[entry\][^)]*windowsHide:\s*true/],
+    ["standalone embedding daemon", "src/embeddings/standalone-embed-client.ts", /_spawn\(process\.execPath,\s*\[daemonEntry\][^)]*windowsHide:\s*true/],
+    ["codex session-start setup", "src/hooks/codex/session-start.ts", /spawn\("node",\s*\[setupScript\][^)]*windowsHide:\s*true/],
+    ["shared autoupdate", "src/hooks/shared/autoupdate.ts", /spawn\(cmd,\s*args[^)]*windowsHide:\s*true/],
+  ];
+  for (const [name, rel, re] of CASES) {
+    it(`${name} passes windowsHide`, () => {
+      expect(src(rel)).toMatch(re);
+    });
+  }
+
+  it("openclaw's graph build and pull workers both pass windowsHide", () => {
+    const oc = src("harnesses/openclaw/src/graph-lifecycle.ts");
+    expect(oc).toMatch(/sp\(process\.execPath,\s*\[workerPath\][^)]*windowsHide:\s*true/);
+    expect(oc).toMatch(/sp\("nohup",\s*\["node",\s*workerPath[^)]*windowsHide:\s*true/);
+  });
+
+  it("pi's four detached launches all pass windowsHide", () => {
+    const pi = src("harnesses/pi/extension-source/hivemind.ts");
+    // embedding daemon, skillopt worker, wiki worker, skillify worker
+    expect(pi).toMatch(/spawn\(process\.execPath,\s*\[EMBED_DAEMON_ENTRY\][^)]*windowsHide:\s*true/);
+    expect(pi).toMatch(/spawn\(process\.execPath,\s*\[PI_SKILLOPT_WORKER_PATH\][^)]*windowsHide:\s*true/);
+    expect(pi).toMatch(/spawn\(process\.execPath,\s*\[PI_WIKI_WORKER_PATH,\s*configPath\][^)]*windowsHide:\s*true/);
+    expect(pi).toMatch(/spawn\(process\.execPath,\s*\[PI_SKILLIFY_WORKER_PATH,\s*configPath\][^)]*windowsHide:\s*true/);
+  });
+});
+
+/**
+ * The launcher lookups hardcoded Unix `which`, so on Windows they threw on
+ * every call — pi's auto-mine fallback and openclaw's agent detection were
+ * not merely noisy there, they never resolved a binary at all.
+ */
+describe("platform-correct binary lookups — source guards", () => {
+  it("pi selects where/which by platform and takes the first non-empty match", () => {
+    const pi = src("harnesses/pi/extension-source/hivemind.ts");
+    expect(pi).toContain('const lookup = process.platform === "win32" ? "where" : "which";');
+    expect(pi).toMatch(/execFileSync\(lookup,\s*\["hivemind"\]/);
+    // `where` prints one match per line; a raw .trim() would return all of them
+    expect(pi).toMatch(/split\(\/\\r\?\\n\/\)[\s\S]{0,60}find\(Boolean\)/);
+  });
+
+  it("openclaw selects where/which by platform", () => {
+    const oc = src("harnesses/openclaw/src/index.ts");
+    expect(oc).toContain('const lookup = process.platform === "win32" ? "where" : "which";');
+    expect(oc).toMatch(/realExecFileSync\(lookup,\s*\[bin\]/);
   });
 });

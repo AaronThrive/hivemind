@@ -72,6 +72,8 @@ async function main(): Promise<void> {
     const child = spawn("node", [setupScript], {
       detached: true,
       stdio: ["pipe", "ignore", "ignore"],
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
       env: { ...process.env },
     });
     // Feed the same stdin input to the setup process

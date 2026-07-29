@@ -57,6 +57,8 @@ export function spawnOpenclawGraphOnStop(
     const child = sp(process.execPath, [workerPath], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
       cwd,
     });
     child.on("error", () => { /* best-effort */ });
@@ -80,6 +82,8 @@ export function spawnOpenclawGraphPullWorker(
     const child = sp("nohup", ["node", workerPath, "--cwd", cwd], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
     });
     child.on("error", () => { graphPullSpawned = false; });
     child.unref();

@@ -398,6 +398,8 @@ function trySpawnDaemonInline(): boolean {
     const child = spawn(process.execPath, [EMBED_DAEMON_ENTRY], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
     });
     child.unref();
     logHm(`embed: spawned daemon pid=${child.pid}`);
@@ -633,6 +635,8 @@ function skilloptReact(sessionId: string, reaction: string): void {
     const child = spawn(process.execPath, [PI_SKILLOPT_WORKER_PATH], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
       env: {
         ...process.env,
         HIVEMIND_SKILLOPT_WORKER: "1", // recursion guard (worker won't re-fire the trigger)
@@ -838,6 +842,8 @@ function spawnWikiWorker(
     spawn(process.execPath, [PI_WIKI_WORKER_PATH, configPath], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
       env: { ...process.env, HIVEMIND_WIKI_WORKER: "1", HIVEMIND_CAPTURE: "false" },
     }).unref();
   } catch (e: any) {
@@ -928,6 +934,8 @@ function spawnPiSkillifyWorker(creds: Creds, sessionId: string, cwd: string): vo
     spawn(process.execPath, [PI_SKILLIFY_WORKER_PATH, configPath], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
       env: { ...process.env, HIVEMIND_SKILLIFY_WORKER: "1", HIVEMIND_CAPTURE: "false" },
     }).unref();
   } catch (e: any) {
@@ -1126,11 +1134,11 @@ function piMaybeAutoMineLocal(): boolean {
     } catch { /* fall through to which */ }
     if (!launcher) {
       try {
-        // NOTE: "which" is hardcoded, so this lookup cannot succeed on
-        // Windows at all — tracked separately; windowsHide keeps it from
-        // flashing wherever it does run.
-        const out = execFileSync("which", ["hivemind"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
-        const bin = String(out).trim();
+        // `which` is Unix-only; Windows needs `where`, which also prints one
+        // match per line — take the first non-empty one.
+        const lookup = process.platform === "win32" ? "where" : "which";
+        const out = execFileSync(lookup, ["hivemind"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+        const bin = String(out).split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "";
         if (bin) launcher = { kind: "bin", path: bin };
       } catch { return false; }
     }
