@@ -591,9 +591,10 @@ function detectOpenclawGateAgent(): GateAgent | null {
   ];
   for (const [agent, bin] of candidates) {
     try {
-      // NOTE: "which" is hardcoded here too — same Windows gap as pi's
-      // launcher lookup, tracked separately.
-      realExecFileSync("which", [bin], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+      // `which` is Unix-only; Windows needs `where`. Without this the gate
+      // detection throws on every candidate and reports "no agent found".
+      const lookup = process.platform === "win32" ? "where" : "which";
+      realExecFileSync(lookup, [bin], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
       return agent;
     } catch { /* not on PATH, try next */ }
   }
