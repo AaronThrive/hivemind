@@ -85,7 +85,7 @@ describe("detached worker spawn windowsHide — source guards", () => {
 
   it("pi's auto-mine launcher lookup and worker launch both pass windowsHide", () => {
     const pi = src("harnesses/pi/extension-source/hivemind.ts");
-    expect(pi).toMatch(/execFileSync\(lookup,\s*\["hivemind"\][^)]*windowsHide:\s*true/);
+    expect(pi).toMatch(/execFileSync\(isWin \? "where" : "which",\s*\["hivemind"\][^)]*windowsHide:\s*true/);
     expect(pi).toMatch(/spawn\(cmd,\s*args[^)]*windowsHide:\s*true/);
   });
 
@@ -118,7 +118,10 @@ describe("hook-triggered detached launch windowsHide — source guards", () => {
   it("openclaw's graph build and pull workers both pass windowsHide", () => {
     const oc = src("harnesses/openclaw/src/graph-lifecycle.ts");
     expect(oc).toMatch(/sp\(process\.execPath,\s*\[workerPath\][^)]*windowsHide:\s*true/);
-    expect(oc).toMatch(/sp\("nohup",\s*\["node",\s*workerPath[^)]*windowsHide:\s*true/);
+    // nohup is POSIX-only: on Windows it ENOENT'd, so the pull worker never
+    // ran there and windowsHide was moot. Must spawn node directly.
+    expect(oc).not.toContain('"nohup"');
+    expect(oc).toMatch(/sp\(process\.execPath,\s*\[workerPath,\s*"--cwd",\s*cwd\][^)]*windowsHide:\s*true/);
   });
 
   it("pi's four detached launches all pass windowsHide", () => {
@@ -137,12 +140,19 @@ describe("hook-triggered detached launch windowsHide — source guards", () => {
  * not merely noisy there, they never resolved a binary at all.
  */
 describe("platform-correct binary lookups — source guards", () => {
-  it("pi selects where/which by platform and takes the first non-empty match", () => {
+  it("pi mirrors resolve-cli-bin's .exe -> .cmd/.bat selection on Windows", () => {
     const pi = src("harnesses/pi/extension-source/hivemind.ts");
-    expect(pi).toContain('const lookup = process.platform === "win32" ? "where" : "which";');
-    expect(pi).toMatch(/execFileSync\(lookup,\s*\["hivemind"\]/);
-    // `where` prints one match per line; a raw .trim() would return all of them
-    expect(pi).toMatch(/split\(\/\\r\?\\n\/\)[\s\S]{0,60}find\(Boolean\)/);
+    expect(pi).toContain('const isWin = process.platform === "win32";');
+    expect(pi).toMatch(/execFileSync\(isWin \? "where" : "which",\s*\["hivemind"\]/);
+    // an extensionless shim is not runnable on Windows, so .exe wins, then .cmd/.bat
+    expect(pi).toMatch(/find\(\(m\) => m\.toLowerCase\(\)\.endsWith\("\.exe"\)\)/);
+    expect(pi).toMatch(/find\(\(m\) => \/\\\.\(cmd\|bat\)\$\/i\.test\(m\)\)/);
+  });
+
+  it("pi runs a .cmd/.bat launcher through a shell", () => {
+    const pi = src("harnesses/pi/extension-source/hivemind.ts");
+    expect(pi).toMatch(/const needsShell = \/\\\.\(cmd\|bat\)\$\/i\.test\(cmd\)/);
+    expect(pi).toMatch(/\.\.\.\(needsShell \? \{ shell: true \} : \{\}\)/);
   });
 
   it("openclaw selects where/which by platform", () => {

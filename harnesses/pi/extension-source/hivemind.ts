@@ -1134,11 +1134,18 @@ function piMaybeAutoMineLocal(): boolean {
     } catch { /* fall through to which */ }
     if (!launcher) {
       try {
-        // `which` is Unix-only; Windows needs `where`, which also prints one
-        // match per line — take the first non-empty one.
-        const lookup = process.platform === "win32" ? "where" : "which";
-        const out = execFileSync(lookup, ["hivemind"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
-        const bin = String(out).split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "";
+        // `which` is Unix-only; Windows needs `where`, which prints one match
+        // per line. Mirror src/utils/resolve-cli-bin.ts: prefer a real .exe,
+        // then a .cmd/.bat shim, else the first match — an extensionless shim
+        // is not directly runnable on Windows.
+        const isWin = process.platform === "win32";
+        const out = execFileSync(isWin ? "where" : "which", ["hivemind"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+        const matches = String(out).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const bin = !isWin
+          ? (matches[0] ?? "")
+          : (matches.find((m) => m.toLowerCase().endsWith(".exe"))
+            ?? matches.find((m) => /\.(cmd|bat)$/i.test(m))
+            ?? matches[0] ?? "");
         if (bin) launcher = { kind: "bin", path: bin };
       } catch { return false; }
     }
@@ -1158,11 +1165,15 @@ function piMaybeAutoMineLocal(): boolean {
       const [cmd, args]: [string, string[]] = launcher.kind === "node-script"
         ? [process.execPath, [launcher.path, "skillify", "mine-local"]]
         : [launcher.path, ["skillify", "mine-local"]];
+      // A .cmd/.bat shim is not directly executable — it needs a shell. Only
+      // the fixed subcommand rides the command line, never user text.
+      const needsShell = /\.(cmd|bat)$/i.test(cmd);
       const child = spawn(cmd, args, {
         detached: true,
         stdio: ["ignore", out, out],
         // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
         windowsHide: true,
+        ...(needsShell ? { shell: true } : {}),
         env: process.env,
       });
       closeSync(out);
