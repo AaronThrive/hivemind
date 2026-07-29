@@ -325,13 +325,13 @@ describe("per-agent bin resolvers", () => {
   it.each(RESOLVERS)("find%sBin returns the resolved path when the lookup succeeds", (_n, fn, _fallback, cli) => {
     vi.mocked(execFileSync).mockReturnValueOnce("/usr/local/bin/the-cli\n");
     expect(fn()).toBe("/usr/local/bin/the-cli");
-    expect(execFileSync).toHaveBeenCalledWith(lookupCmd, [cli], { encoding: "utf-8" });
+    expect(execFileSync).toHaveBeenCalledWith(lookupCmd, [cli], { encoding: "utf-8", windowsHide: true });
   });
 
   it.each(RESOLVERS)("find%sBin falls back to the literal name when the lookup fails", (_n, fn, fallback, cli) => {
     vi.mocked(execFileSync).mockImplementationOnce(() => { throw new Error("not found"); });
     expect(fn()).toBe(fallback);
-    expect(execFileSync).toHaveBeenCalledWith(lookupCmd, [cli], { encoding: "utf-8" });
+    expect(execFileSync).toHaveBeenCalledWith(lookupCmd, [cli], { encoding: "utf-8", windowsHide: true });
   });
 
   it.each(RESOLVERS)(
