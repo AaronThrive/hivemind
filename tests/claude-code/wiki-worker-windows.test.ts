@@ -54,7 +54,7 @@ describe("resolveCliBin — Windows", () => {
     setPlatform("win32");
     execFileSyncMock.mockReturnValue("C:\\npm\\claude.cmd\r\n");
     resolveCliBin("claude");
-    expect(execFileSyncMock).toHaveBeenCalledWith("where", ["claude"], { encoding: "utf-8" });
+    expect(execFileSyncMock).toHaveBeenCalledWith("where", ["claude"], { encoding: "utf-8", windowsHide: true });
   });
 
   it("prefers a .exe over a .cmd shim when both are on PATH", () => {
@@ -97,7 +97,8 @@ describe("resolveCliBin — Unix (unchanged behavior)", () => {
     setPlatform("linux");
     execFileSyncMock.mockReturnValue("/usr/local/bin/claude\n");
     expect(resolveCliBin("claude")).toBe("/usr/local/bin/claude");
-    expect(execFileSyncMock).toHaveBeenCalledWith("which", ["claude"], { encoding: "utf-8" });
+    // windowsHide is a no-op on POSIX but the option object is platform-agnostic.
+    expect(execFileSyncMock).toHaveBeenCalledWith("which", ["claude"], { encoding: "utf-8", windowsHide: true });
   });
 
   it("falls back to an extensionless ~/.claude/local/<cli> when not found", () => {
