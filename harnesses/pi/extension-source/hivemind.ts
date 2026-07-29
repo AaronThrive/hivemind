@@ -826,6 +826,15 @@ function spawnWikiWorker(
   cwd: string,
   reason: "periodic" | "final",
 ): void {
+  // Documented off switch for background summaries (README Configuration):
+  // it must cover the FINAL session-shutdown summary too, not just the
+  // periodic one, or "disables the background session-summary worker
+  // entirely" is false. Doubles as the recursion guard the worker sets on
+  // its own children.
+  if (process.env.HIVEMIND_WIKI_WORKER === "1") {
+    logHm(`spawnWikiWorker(${reason}): HIVEMIND_WIKI_WORKER=1 — background summaries disabled`);
+    return;
+  }
   if (!existsSync(PI_WIKI_WORKER_PATH)) {
     logHm(`spawnWikiWorker(${reason}): no worker at ${PI_WIKI_WORKER_PATH} — install via 'hivemind pi install' or rebuild`);
     return;
@@ -881,16 +890,32 @@ function spawnWikiWorker(
     promptTemplate: WIKI_PROMPT_TEMPLATE,
   };
   try { writeFileSync(configPath, JSON.stringify(config)); }
-  catch (e: any) { logHm(`spawnWikiWorker(${reason}): writeFileSync failed: ${e?.message ?? e}`); return; }
+  catch (e: any) {
+    // Release: pi's tryAcquireSummaryLock has no stale reclaim, so a lock
+    // left behind here is held for the rest of the session and every later
+    // periodic AND final spawn is skipped.
+    logHm(`spawnWikiWorker(${reason}): writeFileSync failed: ${e?.message ?? e}`);
+    releaseSummaryLock(sessionId);
+    return;
+  }
   logHm(`spawnWikiWorker(${reason}): spawning ${PI_WIKI_WORKER_PATH} session=${sessionId} provider=${config.piProvider} model=${config.piModel}`);
   try {
-    spawn(process.execPath, [PI_WIKI_WORKER_PATH, configPath], {
+    const child = spawn(process.execPath, [PI_WIKI_WORKER_PATH, configPath], {
       detached: true,
       stdio: "ignore",
       env: { ...process.env, HIVEMIND_WIKI_WORKER: "1", HIVEMIND_CAPTURE: "false" },
-    }).unref();
+    });
+    // ENOENT / EPERM arrive as an ASYNC 'error' event, never a sync throw —
+    // without this listener the worker never runs AND the lock is never
+    // released, so the session stops summarizing silently.
+    child.on("error", (err: any) => {
+      logHm(`spawnWikiWorker(${reason}): spawn errored: ${err?.message ?? err}`);
+      releaseSummaryLock(sessionId);
+    });
+    child.unref();
   } catch (e: any) {
     logHm(`spawnWikiWorker(${reason}): spawn failed: ${e?.message ?? e}`);
+    releaseSummaryLock(sessionId);
   }
 }
 
@@ -986,9 +1011,6 @@ function spawnPiSkillifyWorker(creds: Creds, sessionId: string, cwd: string): vo
 
 function maybeTriggerPeriodicSummary(creds: Creds, sessionId: string, cwd: string): void {
   if (process.env.HIVEMIND_CAPTURE === "false") return;
-  // Documented off switch for background summaries (README Configuration).
-  // Also the recursion guard the worker itself sets.
-  if (process.env.HIVEMIND_WIKI_WORKER === "1") return;
   const state = bumpCounter(sessionId);
   const cfg = loadSummaryConfig();
   if (!shouldTriggerNow(state, cfg)) return;

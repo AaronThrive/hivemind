@@ -394,10 +394,36 @@ describe("pi extension — #331 review follow-ups", () => {
     expect(PI_SRC).toContain("} catch { return false; }");
   });
 
-  it("honors the documented HIVEMIND_WIKI_WORKER=1 off switch", () => {
-    // README's Configuration table promises this disables background
-    // summaries; pi previously only checked HIVEMIND_CAPTURE.
-    const trigger = PI_SRC.slice(PI_SRC.indexOf("function maybeTriggerPeriodicSummary"));
-    expect(trigger).toContain('process.env.HIVEMIND_WIKI_WORKER === "1"');
+  it("honors HIVEMIND_WIKI_WORKER=1 for the final summary too, not just periodic", () => {
+    // README's Configuration table promises this disables the background
+    // summary worker ENTIRELY. Guarding only maybeTriggerPeriodicSummary
+    // would leave session_shutdown's "final" spawn running, making the
+    // documentation false.
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    const guardAt = spawn.indexOf('process.env.HIVEMIND_WIKI_WORKER === "1"');
+    const lockAt = spawn.indexOf("tryAcquireSummaryLock(sessionId)");
+    expect(guardAt).toBeGreaterThan(-1);
+    // and it gates BEFORE the lock, so a disabled worker never takes one
+    expect(lockAt).toBeGreaterThan(guardAt);
+  });
+
+  it("releases the lock on config-write failure", () => {
+    // pi's tryAcquireSummaryLock has no stale reclaim, so any leaked lock is
+    // held for the rest of the session and skips every later spawn.
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    const writeFail = spawn.indexOf("writeFileSync failed");
+    const release = spawn.indexOf("releaseSummaryLock(sessionId)", writeFail);
+    const ret = spawn.indexOf("return;", release);
+    expect(writeFail).toBeGreaterThan(-1);
+    expect(release).toBeGreaterThan(writeFail);
+    expect(ret).toBeGreaterThan(release);
+  });
+
+  it("releases the lock on both sync and async spawn failure", () => {
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    // async 'error' (ENOENT/EPERM arrive as an event, not a throw)
+    expect(spawn).toMatch(/child\.on\("error"[\s\S]{0,220}releaseSummaryLock\(sessionId\)/);
+    // sync throw
+    expect(spawn).toMatch(/spawn failed[\s\S]{0,120}releaseSummaryLock\(sessionId\)/);
   });
 });
