@@ -652,6 +652,13 @@ interface SummaryState {
   lastSummaryAt: number;
   lastSummaryCount: number;
   totalCount: number;
+  // Mirror of src/hooks/summary-state.ts. A run that fails never calls
+  // finalizeSummary, so without these the first-summary clause below stays
+  // true forever and refires on every captured event (issue #331). They must
+  // also survive a read/write round-trip here, because this file rewrites the
+  // whole state object that the shared worker finalizes against.
+  lastAttemptAt?: number;
+  attemptsSinceSuccess?: number;
 }
 interface SummaryConfig {
   everyNMessages: number;
@@ -688,15 +695,28 @@ function readSummaryState(sessionId: string): SummaryState | null {
       lastSummaryAt: Number(raw.lastSummaryAt) || 0,
       lastSummaryCount: Number(raw.lastSummaryCount) || 0,
       totalCount: Number(raw.totalCount) || 0,
+      lastAttemptAt: Number(raw.lastAttemptAt) || 0,
+      attemptsSinceSuccess: Number(raw.attemptsSinceSuccess) || 0,
     };
   } catch { return null; }
 }
 
-function writeSummaryState(sessionId: string, state: SummaryState): void {
+/**
+ * Returns false when the state could not be persisted. Most callers treat a
+ * failed write as non-fatal, but the #331 attempt stamp must fail closed: an
+ * unpersisted stamp means the next captured event refires immediately, which
+ * is the bug the back-off exists to prevent.
+ */
+function writeSummaryState(sessionId: string, state: SummaryState): boolean {
   try {
     mkdirSync(SUMMARY_STATE_DIR, { recursive: true });
     writeFileSync(summaryStatePath(sessionId), JSON.stringify(state));
-  } catch { /* non-fatal */ }
+    return true;
+  } catch { return false; }
+}
+
+function releaseSummaryLock(sessionId: string): void {
+  try { unlinkSync(summaryLockPath(sessionId)); } catch { /* already gone */ }
 }
 
 function bumpCounter(sessionId: string): SummaryState {
@@ -706,8 +726,18 @@ function bumpCounter(sessionId: string): SummaryState {
   return cur;
 }
 
-function shouldTriggerNow(state: SummaryState, cfg: SummaryConfig): boolean {
+/** Mirror of retryBackoffMs in src/hooks/summary-state.ts: 1..30 minutes. */
+function retryBackoffMs(attemptsSinceSuccess: number): number {
+  if (attemptsSinceSuccess <= 0) return 0;
+  return Math.min(2 ** (attemptsSinceSuccess - 1), 30) * 60 * 1000;
+}
+
+function shouldTriggerNow(state: SummaryState, cfg: SummaryConfig, now = Date.now()): boolean {
   const msgsSince = state.totalCount - state.lastSummaryCount;
+  // A run started but never finalized — it failed. Hold off instead of
+  // respawning the worker on the next captured event (issue #331).
+  const attempts = state.attemptsSinceSuccess ?? 0;
+  if (attempts > 0 && now - (state.lastAttemptAt ?? 0) < retryBackoffMs(attempts)) return false;
   // First-chat trigger: index a fresh session quickly (10 events) instead of
   // waiting until N=50. Mirrors summary-state.ts in CC/codex.
   if (state.lastSummaryCount === 0 && state.totalCount >= FIRST_SUMMARY_AT) return true;
@@ -796,6 +826,15 @@ function spawnWikiWorker(
   cwd: string,
   reason: "periodic" | "final",
 ): void {
+  // Documented off switch for background summaries (README Configuration):
+  // it must cover the FINAL session-shutdown summary too, not just the
+  // periodic one, or "disables the background session-summary worker
+  // entirely" is false. Doubles as the recursion guard the worker sets on
+  // its own children.
+  if (process.env.HIVEMIND_WIKI_WORKER === "1") {
+    logHm(`spawnWikiWorker(${reason}): HIVEMIND_WIKI_WORKER=1 — background summaries disabled`);
+    return;
+  }
   if (!existsSync(PI_WIKI_WORKER_PATH)) {
     logHm(`spawnWikiWorker(${reason}): no worker at ${PI_WIKI_WORKER_PATH} — install via 'hivemind pi install' or rebuild`);
     return;
@@ -806,6 +845,25 @@ function spawnWikiWorker(
   if (!tryAcquireSummaryLock(sessionId)) {
     logHm(`spawnWikiWorker(${reason}): lock held — skipping (a worker is already running)`);
     return;
+  }
+  // Stamp the attempt AFTER winning the lock, against freshly-read state
+  // (issue #331). Stamping in the caller — before the lock, using the state
+  // object read at trigger time — could overwrite a concurrent worker's
+  // successful finalization with stale counters, and would record a
+  // lock-suppressed non-spawn as a failed attempt. Periodic only: a final
+  // summary at session shutdown gets no back-off, matching summary-state.ts.
+  if (reason === "periodic") {
+    const fresh = readSummaryState(sessionId);
+    const stamped = fresh !== null && writeSummaryState(sessionId, {
+      ...fresh,
+      lastAttemptAt: Date.now(),
+      attemptsSinceSuccess: (fresh.attemptsSinceSuccess ?? 0) + 1,
+    });
+    if (!stamped) {
+      logHm(`spawnWikiWorker(${reason}): could not persist the attempt stamp — releasing the lock and skipping (a spawn we cannot record would refire on every event)`);
+      releaseSummaryLock(sessionId);
+      return;
+    }
   }
   // tmp dir owned by the worker; it removes it on completion.
   const tmpDir = join(tmpdir(), `deeplake-wiki-${sessionId}-${Date.now()}`);
@@ -832,16 +890,32 @@ function spawnWikiWorker(
     promptTemplate: WIKI_PROMPT_TEMPLATE,
   };
   try { writeFileSync(configPath, JSON.stringify(config)); }
-  catch (e: any) { logHm(`spawnWikiWorker(${reason}): writeFileSync failed: ${e?.message ?? e}`); return; }
+  catch (e: any) {
+    // Release: pi's tryAcquireSummaryLock has no stale reclaim, so a lock
+    // left behind here is held for the rest of the session and every later
+    // periodic AND final spawn is skipped.
+    logHm(`spawnWikiWorker(${reason}): writeFileSync failed: ${e?.message ?? e}`);
+    releaseSummaryLock(sessionId);
+    return;
+  }
   logHm(`spawnWikiWorker(${reason}): spawning ${PI_WIKI_WORKER_PATH} session=${sessionId} provider=${config.piProvider} model=${config.piModel}`);
   try {
-    spawn(process.execPath, [PI_WIKI_WORKER_PATH, configPath], {
+    const child = spawn(process.execPath, [PI_WIKI_WORKER_PATH, configPath], {
       detached: true,
       stdio: "ignore",
       env: { ...process.env, HIVEMIND_WIKI_WORKER: "1", HIVEMIND_CAPTURE: "false" },
-    }).unref();
+    });
+    // ENOENT / EPERM arrive as an ASYNC 'error' event, never a sync throw —
+    // without this listener the worker never runs AND the lock is never
+    // released, so the session stops summarizing silently.
+    child.on("error", (err: any) => {
+      logHm(`spawnWikiWorker(${reason}): spawn errored: ${err?.message ?? err}`);
+      releaseSummaryLock(sessionId);
+    });
+    child.unref();
   } catch (e: any) {
     logHm(`spawnWikiWorker(${reason}): spawn failed: ${e?.message ?? e}`);
+    releaseSummaryLock(sessionId);
   }
 }
 

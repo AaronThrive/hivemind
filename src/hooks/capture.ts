@@ -21,6 +21,7 @@ import {
   loadTriggerConfig,
   shouldTrigger,
   tryAcquireLock,
+  markSummaryAttempt,
   releaseLock,
   ensureSessionOwner,
 } from "./summary-state.js";
@@ -273,6 +274,12 @@ function maybeTriggerPeriodicSummary(sessionId: string, cwd: string, config: Con
 
     wikiLog(`Periodic: threshold hit (total=${state.totalCount}, since=${state.totalCount - state.lastSummaryCount}, N=${cfg.everyNMessages}, hours=${cfg.everyHours})`);
     try {
+      // Stamp the attempt BEFORE spawning: a run that fails never reaches
+      // finalizeSummary, and without this the trigger would refire on the
+      // very next captured event (issue #331). Inside the try so a failed
+      // state write releases the lock instead of leaking it until the
+      // 10-minute stale reclaim.
+      markSummaryAttempt(sessionId);
       spawnWikiWorker({
         config,
         sessionId,

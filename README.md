@@ -319,6 +319,10 @@ This plugin captures session activity and stores it in your Deeplake workspace:
 | `HIVEMIND_CAPTURE`        | `true`                    | Set to `false` to disable capture          |
 | `HIVEMIND_CAPTURE_ONLY_CLI` | _(none)_                | Set to `true` to capture only interactive CLI sessions. Sessions spawned by the Claude Agent SDK (Python/TypeScript) are skipped; their `CLAUDE_CODE_ENTRYPOINT` is `sdk-py` / `sdk-ts`, so they fail the substring check for `cli`. |
 | `HIVEMIND_SKILLIFY_EVERY_N_TURNS` | `20`              | Assistant turns between auto skill-mining attempts. Lower = more frequent mining (cheaper sessions, noisier output); higher = fewer attempts on longer histories. |
+| `HIVEMIND_SUMMARY_EVERY_N_MSGS` | `50`                | Captured events between periodic session summaries. The first summary of a session runs at 10 events regardless. Raise it to cut background summary runs. |
+| `HIVEMIND_SUMMARY_EVERY_HOURS` | `2`                  | Time-based summary cadence, used when at least one new event has arrived since the last summary. |
+| `HIVEMIND_WIKI_WORKER`    | _(none)_                  | Set to `1` to disable the background session-summary worker entirely (no `claude -p` summary runs). Also set automatically inside the worker as a recursion guard. Capture and recall keep working. |
+| `HIVEMIND_GRAPH_ON_STOP`  | _(none)_                  | Set to `0` to disable the code-graph rebuild that runs on `Stop` / `SessionEnd`. |
 | `HIVEMIND_EMBEDDINGS`     | `true`                    | Set to `false` to force lexical-only mode  |
 | `HIVEMIND_PROACTIVE_RECALL_DISABLED` | _(none)_       | Set to `1` to disable **proactive recall** (auto-searching team memory on each recall-worthy prompt and injecting a relevant snippet into the agent's context). On by default. Does **not** affect capture or the agent's own grep/skill recall. Alt form: `HIVEMIND_PROACTIVE_RECALL=0`. |
 | `HIVEMIND_RECALL_MIN_OVERLAP` | `2`                   | Proactive recall (lexical mode): min distinct prompt keywords a summary must share to be injected. Higher = stricter. |

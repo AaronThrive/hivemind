@@ -328,3 +328,102 @@ describe("pi extension — per-directory .hivemind wiring", () => {
     expect(PI_SRC).toContain("capture is disabled for this directory");
   });
 });
+
+describe("pi extension — failed-summary back-off (issue #331)", () => {
+  it("preserves the attempt fields across a state read/write round-trip", () => {
+    // pi rewrites the WHOLE state object into the same dir the shared
+    // wiki-worker finalizes against. Dropping these on read would strip them
+    // from the file and restore the infinite-refire behavior.
+    expect(PI_SRC).toContain("lastAttemptAt: Number(raw.lastAttemptAt) || 0");
+    expect(PI_SRC).toContain("attemptsSinceSuccess: Number(raw.attemptsSinceSuccess) || 0");
+  });
+
+  it("suppresses the trigger while a failed run's back-off window is open", () => {
+    expect(PI_SRC).toMatch(
+      /if \(attempts > 0 && now - \(state\.lastAttemptAt \?\? 0\) < retryBackoffMs\(attempts\)\) return false;/,
+    );
+  });
+
+  it("stamps the attempt after winning the lock, not before", () => {
+    // Stamping in the caller (before tryAcquireSummaryLock) would overwrite a
+    // concurrent worker's finalization with stale counters and would record a
+    // lock-suppressed non-spawn as a failure.
+    const trigger = PI_SRC.slice(
+      PI_SRC.indexOf("function maybeTriggerPeriodicSummary"),
+    );
+    expect(trigger).not.toContain("attemptsSinceSuccess");
+
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    const lockAt = spawn.indexOf("tryAcquireSummaryLock(sessionId)");
+    const stampAt = spawn.indexOf("attemptsSinceSuccess: (fresh.attemptsSinceSuccess ?? 0) + 1");
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(stampAt).toBeGreaterThan(lockAt);
+  });
+
+  it("stamps against freshly-read state, not the trigger-time snapshot", () => {
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    expect(spawn).toContain("const fresh = readSummaryState(sessionId)");
+    expect(spawn).toContain("...fresh,");
+  });
+
+  it("does not back off the final session-shutdown summary", () => {
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    expect(spawn).toContain('if (reason === "periodic")');
+  });
+
+  it("caps the back-off at 30 minutes, matching summary-state.ts", () => {
+    expect(PI_SRC).toContain("Math.min(2 ** (attemptsSinceSuccess - 1), 30) * 60 * 1000");
+  });
+});
+
+describe("pi extension — #331 review follow-ups", () => {
+  it("fails closed when the attempt stamp cannot be persisted", () => {
+    // A spawn we cannot record is exactly the bug: the next captured event
+    // refires immediately. Release the lock and skip instead.
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    expect(spawn).toContain("if (!stamped) {");
+    const stampedAt = spawn.indexOf("if (!stamped) {");
+    const releaseAt = spawn.indexOf("releaseSummaryLock(sessionId)", stampedAt);
+    const returnAt = spawn.indexOf("return;", releaseAt);
+    expect(releaseAt).toBeGreaterThan(stampedAt);
+    expect(returnAt).toBeGreaterThan(releaseAt);
+  });
+
+  it("writeSummaryState reports failure rather than swallowing it", () => {
+    expect(PI_SRC).toMatch(/function writeSummaryState\([^)]*\): boolean \{/);
+    expect(PI_SRC).toContain("} catch { return false; }");
+  });
+
+  it("honors HIVEMIND_WIKI_WORKER=1 for the final summary too, not just periodic", () => {
+    // README's Configuration table promises this disables the background
+    // summary worker ENTIRELY. Guarding only maybeTriggerPeriodicSummary
+    // would leave session_shutdown's "final" spawn running, making the
+    // documentation false.
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    const guardAt = spawn.indexOf('process.env.HIVEMIND_WIKI_WORKER === "1"');
+    const lockAt = spawn.indexOf("tryAcquireSummaryLock(sessionId)");
+    expect(guardAt).toBeGreaterThan(-1);
+    // and it gates BEFORE the lock, so a disabled worker never takes one
+    expect(lockAt).toBeGreaterThan(guardAt);
+  });
+
+  it("releases the lock on config-write failure", () => {
+    // pi's tryAcquireSummaryLock has no stale reclaim, so any leaked lock is
+    // held for the rest of the session and skips every later spawn.
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    const writeFail = spawn.indexOf("writeFileSync failed");
+    const release = spawn.indexOf("releaseSummaryLock(sessionId)", writeFail);
+    const ret = spawn.indexOf("return;", release);
+    expect(writeFail).toBeGreaterThan(-1);
+    expect(release).toBeGreaterThan(writeFail);
+    expect(ret).toBeGreaterThan(release);
+  });
+
+  it("releases the lock on both sync and async spawn failure", () => {
+    const spawn = PI_SRC.slice(PI_SRC.indexOf("function spawnWikiWorker"));
+    // async 'error' (ENOENT/EPERM arrive as an event, not a throw)
+    expect(spawn).toMatch(/child\.on\("error"[\s\S]{0,220}releaseSummaryLock\(sessionId\)/);
+    // sync throw
+    expect(spawn).toMatch(/spawn failed[\s\S]{0,120}releaseSummaryLock\(sessionId\)/);
+  });
+});

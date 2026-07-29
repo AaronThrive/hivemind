@@ -23,6 +23,7 @@ const spawnMock = vi.fn();
 const wikiLogMock = vi.fn();
 const tryAcquireLockMock = vi.fn();
 const releaseLockMock = vi.fn();
+const markSummaryAttemptMock = vi.fn();
 const bumpTotalCountMock = vi.fn();
 const loadTriggerConfigMock = vi.fn();
 const shouldTriggerMock = vi.fn();
@@ -41,6 +42,7 @@ vi.mock("../../src/hooks/spawn-wiki-worker.js", () => ({
   bundleDirFromImportMeta: () => "/fake/bundle",
 }));
 vi.mock("../../src/hooks/summary-state.js", () => ({
+  markSummaryAttempt: (...a: any[]) => markSummaryAttemptMock(...a),
   tryAcquireLock: (...a: any[]) => tryAcquireLockMock(...a),
   releaseLock: (...a: any[]) => releaseLockMock(...a),
   bumpTotalCount: (...a: any[]) => bumpTotalCountMock(...a),
@@ -99,6 +101,7 @@ beforeEach(() => {
   wikiLogMock.mockReset();
   tryAcquireLockMock.mockReset().mockReturnValue(true);
   releaseLockMock.mockReset();
+  markSummaryAttemptMock.mockReset();
   bumpTotalCountMock.mockReset().mockReturnValue({
     lastSummaryAt: Date.now(), lastSummaryCount: 0, totalCount: 1,
   });
@@ -355,6 +358,10 @@ describe("capture hook — periodic trigger helper", () => {
     );
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(spawnMock.mock.calls[0][0]).toMatchObject({ sessionId: "sid-1", reason: "Periodic" });
+    // The attempt must be stamped BEFORE the spawn, otherwise a failing
+    // worker leaves lastSummaryCount at 0 and the trigger refires on every
+    // subsequent captured event (issue #331).
+    expect(markSummaryAttemptMock).toHaveBeenCalledWith("sid-1");
   });
 
   it("logs 'periodic trigger suppressed' when the lock is already held", async () => {
@@ -365,6 +372,17 @@ describe("capture hook — periodic trigger helper", () => {
     expect(debugLogMock).toHaveBeenCalledWith(
       expect.stringContaining("periodic trigger suppressed (lock held)"),
     );
+  });
+
+  it("releases the lock if markSummaryAttempt throws", async () => {
+    // The stamp writes to the state file. If that write fails it must not
+    // leak the spawn lock — otherwise the session stops summarizing until
+    // the 10-minute stale reclaim.
+    shouldTriggerMock.mockReturnValue(true);
+    markSummaryAttemptMock.mockImplementation(() => { throw new Error("state write failed"); });
+    await runHook();
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(releaseLockMock).toHaveBeenCalledWith("sid-1");
   });
 
   it("releases the lock if spawnWikiWorker throws", async () => {
