@@ -21,6 +21,7 @@ import {
   loadTriggerConfig,
   shouldTrigger,
   tryAcquireLock,
+  markSummaryAttempt,
   releaseLock,
   ensureSessionOwner,
 } from "./summary-state.js";
@@ -270,6 +271,11 @@ function maybeTriggerPeriodicSummary(sessionId: string, cwd: string, config: Con
       log(`periodic trigger suppressed (lock held) session=${sessionId}`);
       return;
     }
+
+    // Stamp the attempt BEFORE spawning: a run that fails never reaches
+    // finalizeSummary, and without this the trigger would refire on the very
+    // next captured event (issue #331).
+    markSummaryAttempt(sessionId);
 
     wikiLog(`Periodic: threshold hit (total=${state.totalCount}, since=${state.totalCount - state.lastSummaryCount}, N=${cfg.everyNMessages}, hours=${cfg.everyHours})`);
     try {
