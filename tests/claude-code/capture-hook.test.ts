@@ -374,6 +374,17 @@ describe("capture hook — periodic trigger helper", () => {
     );
   });
 
+  it("releases the lock if markSummaryAttempt throws", async () => {
+    // The stamp writes to the state file. If that write fails it must not
+    // leak the spawn lock — otherwise the session stops summarizing until
+    // the 10-minute stale reclaim.
+    shouldTriggerMock.mockReturnValue(true);
+    markSummaryAttemptMock.mockImplementation(() => { throw new Error("state write failed"); });
+    await runHook();
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(releaseLockMock).toHaveBeenCalledWith("sid-1");
+  });
+
   it("releases the lock if spawnWikiWorker throws", async () => {
     shouldTriggerMock.mockReturnValue(true);
     spawnMock.mockImplementation(() => { throw new Error("spawn failed"); });
