@@ -86,7 +86,7 @@ describe("detached worker spawn windowsHide — source guards", () => {
   it("pi's auto-mine launcher lookup and worker launch both pass windowsHide", () => {
     const pi = src("harnesses/pi/extension-source/hivemind.ts");
     expect(pi).toMatch(/execFileSync\(isWin \? "where" : "which",\s*\["hivemind"\][^)]*windowsHide:\s*true/);
-    expect(pi).toMatch(/spawn\(cmd,\s*args[^)]*windowsHide:\s*true/);
+    expect(pi).toMatch(/spawn\(shellCmd,\s*args[^)]*windowsHide:\s*true/);
   });
 
   it("openclaw's agent lookup and skillify worker launch both pass windowsHide", () => {
@@ -149,10 +149,15 @@ describe("platform-correct binary lookups — source guards", () => {
     expect(pi).toMatch(/find\(\(m\) => \/\\\.\(cmd\|bat\)\$\/i\.test\(m\)\)/);
   });
 
-  it("pi runs a .cmd/.bat launcher through a shell", () => {
+  it("pi shells a .cmd/.bat launcher, win32-gated and quoted", () => {
     const pi = src("harnesses/pi/extension-source/hivemind.ts");
-    expect(pi).toMatch(/const needsShell = \/\\\.\(cmd\|bat\)\$\/i\.test\(cmd\)/);
+    // win32-gated, mirroring binNeedsShell: a POSIX file merely named *.cmd
+    // must still spawn directly
+    expect(pi).toMatch(/const needsShell = process\.platform === "win32" && \/\\\.\(cmd\|bat\)\$\/i\.test\(cmd\)/);
     expect(pi).toMatch(/\.\.\.\(needsShell \? \{ shell: true \} : \{\}\)/);
+    // quoted: shell:true concatenates without escaping, so a path containing
+    // a space would otherwise be parsed as two tokens
+    expect(pi).toMatch(/const shellCmd = needsShell \? `"\$\{cmd\}"` : cmd;/);
   });
 
   it("openclaw selects where/which by platform", () => {

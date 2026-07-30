@@ -1,5 +1,5 @@
 import type { ExecFileSyncOptions } from "node:child_process";
-import { binNeedsShell } from "../utils/resolve-cli-bin.js";
+import { binNeedsShell, shellFile } from "../utils/resolve-cli-bin.js";
 
 /** Fixed flags for the summary-generation `claude -p` call (no user input). */
 const CLAUDE_FLAGS = [
@@ -33,7 +33,7 @@ export interface ClaudeInvocation {
 export function buildClaudeInvocation(claudeBin: string, prompt: string): ClaudeInvocation {
   if (binNeedsShell(claudeBin)) {
     return {
-      file: claudeBin,
+      file: shellFile(claudeBin),
       args: ["-p", ...CLAUDE_FLAGS],
       // windowsHide: the wiki worker is a detached, console-less process, so
       // without CREATE_NO_WINDOW Windows allocates a visible console window
@@ -64,7 +64,7 @@ export function buildClaudeInvocation(claudeBin: string, prompt: string): Claude
 export function buildTrailingPromptInvocation(bin: string, flags: string[], prompt: string): ClaudeInvocation {
   if (binNeedsShell(bin)) {
     return {
-      file: bin,
+      file: shellFile(bin),
       args: [...flags],
       // windowsHide: see buildClaudeInvocation — suppress the visible console
       // window Windows would pop for a child of the console-less worker.
@@ -87,7 +87,7 @@ export function buildTrailingPromptInvocation(bin: string, flags: string[], prom
  */
 export function buildStdinPromptInvocation(bin: string, flags: string[], prompt: string): ClaudeInvocation {
   return {
-    file: bin,
+    file: shellFile(bin),
     args: [...flags],
     options: {
       input: prompt,

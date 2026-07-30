@@ -1165,10 +1165,18 @@ function piMaybeAutoMineLocal(): boolean {
       const [cmd, args]: [string, string[]] = launcher.kind === "node-script"
         ? [process.execPath, [launcher.path, "skillify", "mine-local"]]
         : [launcher.path, ["skillify", "mine-local"]];
-      // A .cmd/.bat shim is not directly executable — it needs a shell. Only
-      // the fixed subcommand rides the command line, never user text.
-      const needsShell = /\.(cmd|bat)$/i.test(cmd);
-      const child = spawn(cmd, args, {
+      // A Windows .cmd/.bat shim is not directly executable — it needs a
+      // shell. Mirror of binNeedsShell in src/utils/resolve-cli-bin.ts,
+      // including the win32 gate: on POSIX a file merely named *.cmd must
+      // still spawn directly.
+      const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd);
+      // Under `shell: true` Node concatenates file + args into one command
+      // string with no escaping, so an unquoted install path containing a
+      // space (C:\\Users\\Jane Doe\\...) is parsed as two tokens. Quote the
+      // executable; only the fixed subcommand rides the command line, never
+      // user text.
+      const shellCmd = needsShell ? `"${cmd}"` : cmd;
+      const child = spawn(shellCmd, args, {
         detached: true,
         stdio: ["ignore", out, out],
         // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.

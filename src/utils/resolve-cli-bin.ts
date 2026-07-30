@@ -65,3 +65,17 @@ export function resolveCliBin(cli: string, fallback?: string): string {
 export function binNeedsShell(bin: string): boolean {
   return process.platform === "win32" && /\.(cmd|bat)$/i.test(bin);
 }
+
+/**
+ * The `file` to hand a shell-mode spawn.
+ *
+ * Under `shell: true` Node concatenates file + args into a single command
+ * string with no escaping, so an unquoted path containing a space —
+ * `C:\Users\Jane Doe\AppData\Roaming\npm\claude.cmd`, the default npm
+ * global bin for any Windows account with a space in its name — is parsed as
+ * two tokens and the spawn fails. Quote it. Non-shell spawns pass argv
+ * directly and must NOT be quoted.
+ */
+export function shellFile(bin: string): string {
+  return binNeedsShell(bin) ? `"${bin}"` : bin;
+}

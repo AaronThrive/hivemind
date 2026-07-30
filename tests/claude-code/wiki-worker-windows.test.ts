@@ -28,7 +28,7 @@ vi.mock("node:os", async () => {
   return { ...actual, homedir: () => "/home/tester" };
 });
 
-import { resolveCliBin, binNeedsShell } from "../../src/utils/resolve-cli-bin.js";
+import { resolveCliBin, binNeedsShell, shellFile } from "../../src/utils/resolve-cli-bin.js";
 import { buildClaudeInvocation, buildTrailingPromptInvocation, buildStdinPromptInvocation, buildClaudeStdinInvocation } from "../../src/hooks/wiki-worker-spawn.js";
 
 const realPlatform = process.platform;
@@ -140,7 +140,9 @@ describe("buildClaudeInvocation", () => {
   it("Windows .cmd: spawns through a shell with the prompt over stdin, never on the command line", () => {
     setPlatform("win32");
     const inv = buildClaudeInvocation("C:\\npm\\claude.cmd", "PROMPT-TEXT");
-    expect(inv.file).toBe("C:\\npm\\claude.cmd");
+    // quoted: under shell:true Node concatenates without escaping, so the
+    // path must carry its own quotes (see the spaced-path describe below)
+    expect(inv.file).toBe('"C:\\npm\\claude.cmd"');
     expect(inv.options.shell).toBe(true);
     expect(inv.options.input).toBe("PROMPT-TEXT");
     expect(inv.args).toEqual(["-p", ...CLAUDE_FLAGS]);
@@ -170,7 +172,7 @@ describe("buildTrailingPromptInvocation (codex / cursor / pi)", () => {
   it("Windows .cmd: shell + prompt over stdin; flags only on the command line", () => {
     setPlatform("win32");
     const inv = buildTrailingPromptInvocation("C:\\npm\\codex.cmd", FLAGS, "PROMPT-TEXT");
-    expect(inv.file).toBe("C:\\npm\\codex.cmd");
+    expect(inv.file).toBe('"C:\\npm\\codex.cmd"');
     expect(inv.options.shell).toBe(true);
     expect(inv.options.input).toBe("PROMPT-TEXT");
     expect(inv.args).toEqual(FLAGS);
@@ -229,5 +231,61 @@ describe("windowsHide — no visible console window for the summarizer CLI", () 
     expect(buildClaudeStdinInvocation("C:\\npm\\claude.cmd", "P").options.windowsHide).toBe(true);
     setPlatform("linux");
     expect(buildClaudeStdinInvocation("/usr/local/bin/claude", "P").options.windowsHide).toBe(true);
+  });
+});
+
+/**
+ * Behavioral cover for the spaced-path bug. `shell: true` makes Node
+ * concatenate file + args into one command string with NO escaping, so an
+ * unquoted path with a space is parsed as two tokens and the spawn fails.
+ *
+ * This is the default npm layout for any Windows account whose name contains
+ * a space — `C:\Users\Jane Doe\AppData\Roaming\npm\claude.cmd` — and npm
+ * ships no .exe, so those users always take the shell branch. A failing
+ * summary run is what drives the #331 respawn loop, so this path matters.
+ */
+describe("shell-mode spawns quote a shim path containing spaces", () => {
+  const SPACED = "C:\\Users\\Jane Doe\\AppData\\Roaming\\npm\\claude.cmd";
+
+  it("shellFile quotes a Windows shim and leaves everything else alone", () => {
+    setPlatform("win32");
+    expect(shellFile(SPACED)).toBe(`"${SPACED}"`);
+    expect(shellFile("C:\\x\\claude.exe")).toBe("C:\\x\\claude.exe");
+    setPlatform("linux");
+    // a POSIX file merely named *.cmd is spawned directly — quoting it would
+    // make the path itself wrong
+    expect(shellFile("/usr/bin/weird.cmd")).toBe("/usr/bin/weird.cmd");
+  });
+
+  it("buildClaudeInvocation quotes the spaced shim and keeps the prompt off argv", () => {
+    setPlatform("win32");
+    const inv = buildClaudeInvocation(SPACED, "PROMPT");
+    expect(inv.file).toBe(`"${SPACED}"`);
+    expect(inv.options.shell).toBe(true);
+    expect(inv.options.input).toBe("PROMPT");
+    expect(inv.args).not.toContain("PROMPT");
+  });
+
+  it("buildTrailingPromptInvocation quotes the spaced shim", () => {
+    setPlatform("win32");
+    const inv = buildTrailingPromptInvocation(SPACED, ["exec"], "PROMPT");
+    expect(inv.file).toBe(`"${SPACED}"`);
+    expect(inv.options.shell).toBe(true);
+  });
+
+  it("buildStdinPromptInvocation quotes the spaced shim", () => {
+    setPlatform("win32");
+    const inv = buildStdinPromptInvocation(SPACED, ["-p"], "PROMPT");
+    expect(inv.file).toBe(`"${SPACED}"`);
+    expect(inv.options.shell).toBe(true);
+  });
+
+  it("does NOT quote on the non-shell path, where argv is passed directly", () => {
+    setPlatform("win32");
+    const exe = "C:\\Program Files\\claude\\claude.exe";
+    const inv = buildClaudeInvocation(exe, "PROMPT");
+    // no shell -> argv, so a quoted path would be a literally wrong filename
+    expect(inv.file).toBe(exe);
+    expect(inv.options.shell).toBeUndefined();
   });
 });
