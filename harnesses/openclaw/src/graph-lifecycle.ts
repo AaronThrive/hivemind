@@ -57,6 +57,8 @@ export function spawnOpenclawGraphOnStop(
     const child = sp(process.execPath, [workerPath], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
       cwd,
     });
     child.on("error", () => { /* best-effort */ });
@@ -77,9 +79,15 @@ export function spawnOpenclawGraphPullWorker(
   if (!existsFn(workerPath)) return;
   try {
     const sp = deps.spawn ?? realSpawn;
-    const child = sp("nohup", ["node", workerPath, "--cwd", cwd], {
+    // `nohup` is POSIX-only — on Windows this spawn ENOENT'd, so the pull
+    // worker never ran there at all and windowsHide could not help. detached
+    // + unref already gives the survival nohup was there for, and it matches
+    // what graph-on-stop does.
+    const child = sp(process.execPath, [workerPath, "--cwd", cwd], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
     });
     child.on("error", () => { graphPullSpawned = false; });
     child.unref();

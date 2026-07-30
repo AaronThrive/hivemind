@@ -85,6 +85,9 @@ export function findHivemindLauncher(): HivemindLauncher | null {
     const out = execFileSync(lookup, ["hivemind"], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
+      // CREATE_NO_WINDOW: same reason as resolveCliBin — this runs from a
+      // detached worker with no console to inherit. No-op on POSIX.
+      windowsHide: true,
     });
     const bin = out.trim();
     return bin ? { kind: "bin", path: bin } : null;
@@ -192,6 +195,9 @@ export function maybeAutoMineLocal(opts: AutoMineOptions = {}): AutoMineGuardRep
     const child = spawn(cmd, args, {
       detached: true,
       stdio: ["ignore", out, out],
+      // SW_HIDE: libuv still applies it alongside detached, so the mining
+      // worker never flashes a console. No-op on POSIX.
+      windowsHide: true,
       env: process.env,
     });
     closeSync(out);

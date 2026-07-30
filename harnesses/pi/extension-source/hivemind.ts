@@ -398,6 +398,8 @@ function trySpawnDaemonInline(): boolean {
     const child = spawn(process.execPath, [EMBED_DAEMON_ENTRY], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
     });
     child.unref();
     logHm(`embed: spawned daemon pid=${child.pid}`);
@@ -633,6 +635,8 @@ function skilloptReact(sessionId: string, reaction: string): void {
     const child = spawn(process.execPath, [PI_SKILLOPT_WORKER_PATH], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
       env: {
         ...process.env,
         HIVEMIND_SKILLOPT_WORKER: "1", // recursion guard (worker won't re-fire the trigger)
@@ -903,6 +907,8 @@ function spawnWikiWorker(
     const child = spawn(process.execPath, [PI_WIKI_WORKER_PATH, configPath], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
       env: { ...process.env, HIVEMIND_WIKI_WORKER: "1", HIVEMIND_CAPTURE: "false" },
     });
     // ENOENT / EPERM arrive as an ASYNC 'error' event, never a sync throw —
@@ -1002,6 +1008,8 @@ function spawnPiSkillifyWorker(creds: Creds, sessionId: string, cwd: string): vo
     spawn(process.execPath, [PI_SKILLIFY_WORKER_PATH, configPath], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
       env: { ...process.env, HIVEMIND_SKILLIFY_WORKER: "1", HIVEMIND_CAPTURE: "false" },
     }).unref();
   } catch (e: any) {
@@ -1200,8 +1208,18 @@ function piMaybeAutoMineLocal(): boolean {
     } catch { /* fall through to which */ }
     if (!launcher) {
       try {
-        const out = execFileSync("which", ["hivemind"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
-        const bin = String(out).trim();
+        // `which` is Unix-only; Windows needs `where`, which prints one match
+        // per line. Mirror src/utils/resolve-cli-bin.ts: prefer a real .exe,
+        // then a .cmd/.bat shim, else the first match — an extensionless shim
+        // is not directly runnable on Windows.
+        const isWin = process.platform === "win32";
+        const out = execFileSync(isWin ? "where" : "which", ["hivemind"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+        const matches = String(out).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const bin = !isWin
+          ? (matches[0] ?? "")
+          : (matches.find((m) => m.toLowerCase().endsWith(".exe"))
+            ?? matches.find((m) => /\.(cmd|bat)$/i.test(m))
+            ?? matches[0] ?? "");
         if (bin) launcher = { kind: "bin", path: bin };
       } catch { return false; }
     }
@@ -1221,9 +1239,23 @@ function piMaybeAutoMineLocal(): boolean {
       const [cmd, args]: [string, string[]] = launcher.kind === "node-script"
         ? [process.execPath, [launcher.path, "skillify", "mine-local"]]
         : [launcher.path, ["skillify", "mine-local"]];
-      const child = spawn(cmd, args, {
+      // A Windows .cmd/.bat shim is not directly executable — it needs a
+      // shell. Mirror of binNeedsShell in src/utils/resolve-cli-bin.ts,
+      // including the win32 gate: on POSIX a file merely named *.cmd must
+      // still spawn directly.
+      const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd);
+      // Under `shell: true` Node concatenates file + args into one command
+      // string with no escaping, so an unquoted install path containing a
+      // space (C:\\Users\\Jane Doe\\...) is parsed as two tokens. Quote the
+      // executable; only the fixed subcommand rides the command line, never
+      // user text.
+      const shellCmd = needsShell ? `"${cmd}"` : cmd;
+      const child = spawn(shellCmd, args, {
         detached: true,
         stdio: ["ignore", out, out],
+        // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+        windowsHide: true,
+        ...(needsShell ? { shell: true } : {}),
         env: process.env,
       });
       closeSync(out);

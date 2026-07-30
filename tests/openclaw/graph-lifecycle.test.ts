@@ -55,10 +55,13 @@ describe("openclaw graph-lifecycle", () => {
     spawnOpenclawGraphPullWorker("/dist/graph-pull-worker.js", "/my/repo", { spawn, exists });
     spawnOpenclawGraphPullWorker("/dist/graph-pull-worker.js", "/my/repo", { spawn, exists });
     expect(spawn).toHaveBeenCalledTimes(1);
+    // node directly, not `nohup` — nohup is POSIX-only and ENOENT'd on
+    // Windows, so the pull worker never ran there. detached + unref is what
+    // provides survival, matching graph-on-stop.
     expect(spawn).toHaveBeenCalledWith(
-      "nohup",
-      ["node", "/dist/graph-pull-worker.js", "--cwd", "/my/repo"],
-      expect.objectContaining({ detached: true }),
+      process.execPath,
+      ["/dist/graph-pull-worker.js", "--cwd", "/my/repo"],
+      expect.objectContaining({ detached: true, windowsHide: true }),
     );
   });
 

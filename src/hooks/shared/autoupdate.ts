@@ -128,6 +128,8 @@ const defaultSpawn = (cmd: string, args: string[]): { pid?: number } => {
   const child = spawn(cmd, args, {
     detached: true,
     stdio: "ignore",
+    // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+    windowsHide: true,
   });
   child.unref();
   // Swallow the unhandled 'error' event that fires synchronously when

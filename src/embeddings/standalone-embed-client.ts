@@ -219,6 +219,8 @@ function trySpawnDaemon(daemonEntry: string, pidPath: string): boolean {
     const child = _spawn(process.execPath, [daemonEntry], {
       detached: true,
       stdio: "ignore",
+      // SW_HIDE: libuv applies it alongside detached. No-op on POSIX.
+      windowsHide: true,
     });
     child.unref();
     return true;
