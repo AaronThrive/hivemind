@@ -22,6 +22,7 @@ import { readState, writeState, alreadyShown, markShown, tryClaim, releaseClaim 
 import { emit } from "./delivery/index.js";
 import { fetchBackendNotifications } from "./sources/backend.js";
 import { pickPrimaryBanner } from "./sources/primary-banner.js";
+import { pickLowBalanceNotice } from "./sources/low-balance.js";
 import { log as _log } from "../utils/debug.js";
 
 const log = (msg: string) => _log("notifications", msg);
@@ -29,6 +30,25 @@ const log = (msg: string) => _log("notifications", msg);
 export type { Notification, Rule, Trigger, Severity, NotificationContext, NotificationsState, NotificationsQueue, Agent } from "./types.js";
 export { registerRule, listRules, _resetRulesForTest } from "./rules/registry.js";
 export { enqueueNotification } from "./queue.js";
+
+/**
+ * Rank order for the rendered block: anything the user must act on outranks
+ * anything informational. Without this, a "credits exhausted — top up" line
+ * rendered UNDER the welcome banner and the referral nudge, which is exactly
+ * where a user stops reading (reported 2026-08-12 in #platform: "I didn't
+ * receive an unprompted CTA to top up at any time").
+ *
+ * Stable within a severity: `sort` is stable in Node, so the source order
+ * above (primary banner → low balance → rules → queue → backend) still
+ * decides ties.
+ */
+const SEVERITY_RANK: Record<string, number> = { error: 0, warn: 1, info: 2 };
+
+function sortBySeverity(items: Notification[]): Notification[] {
+  return [...items].sort(
+    (a, b) => (SEVERITY_RANK[a.severity ?? "info"] ?? 2) - (SEVERITY_RANK[b.severity ?? "info"] ?? 2),
+  );
+}
 
 export interface DrainOptions {
   agent: Agent;
@@ -56,6 +76,16 @@ export interface DrainOptions {
    * entry point via bumpSessionCount so rules stay IO-free.
    */
   sessionCount?: number;
+  /**
+   * Delivery override. When set, the claimed notifications are handed to
+   * this function instead of the per-agent adapter in delivery/index.ts.
+   *
+   * Needed by harnesses whose SessionStart hook already writes its own JSON
+   * object to stdout — Codex tolerates exactly one, so the hook collects the
+   * notifications here and merges them into that object rather than letting
+   * an adapter write a second. See src/hooks/codex/session-start.ts.
+   */
+  deliver?: (notifications: Notification[]) => void;
 }
 
 /**
@@ -97,14 +127,24 @@ export async function drainSessionStart(opts: DrainOptions): Promise<void> {
     // Backend pushes remain additive in this PR — they're rare and not yet
     // under the priority model. A follow-up will collapse all sources
     // (including queue) under the same priority.
-    const [fromBackend, primary] = await Promise.all([
+    //
+    // The low-balance notice runs as its own source, NOT as a rider on the
+    // primary banner: a billing warning must not inherit the banner's
+    // suppression rules (resume sessions, missing session_id, the 1h stats
+    // cache). See sources/low-balance.ts for the full list of gates that
+    // used to swallow it.
+    const [fromBackend, primary, lowBalance] = await Promise.all([
       fetchBackendNotifications(opts.creds),
       pickPrimaryBanner(opts.sessionId, opts.creds, opts.source),
+      pickLowBalanceNotice(opts.creds),
     ]);
     const fromPrimary = primary != null ? [primary] : [];
+    const fromLowBalance = lowBalance != null ? [lowBalance] : [];
     // Primary banner first so the user reads "Welcome back / <brief>" at the
-    // top, then everything else (low-balance, backend pushes, rules) below.
-    const all: Notification[] = [...fromPrimary, ...fromRules, ...fromQueue, ...fromBackend];
+    // top, then everything else (backend pushes, rules) below.
+    const all: Notification[] = sortBySeverity([
+      ...fromPrimary, ...fromLowBalance, ...fromRules, ...fromQueue, ...fromBackend,
+    ]);
 
     const fresh = all.filter(n => !alreadyShown(state, n));
     if (fresh.length === 0) {
@@ -126,7 +166,8 @@ export async function drainSessionStart(opts: DrainOptions): Promise<void> {
     // Adapter decides per-channel rendering (some notifications go only
     // to user-visible channels). See delivery/claude-code.ts for the
     // model-vs-user split that closes the codex prompt-injection P1.
-    emit(opts.agent, claimed);
+    if (opts.deliver) opts.deliver(claimed);
+    else emit(opts.agent, claimed);
 
     // Persist state for non-transient notifications. Transient ones (see
     // Notification.transient docstring) are self-clearing — their enqueue
