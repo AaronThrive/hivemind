@@ -146,9 +146,20 @@ export async function drainSessionStart(opts: DrainOptions): Promise<void> {
     // enqueued under one org rendered after switching to another, linking to
     // the wrong billing page). The live read is scoped to current credentials.
     const liveIds = new Set(fromLowBalance.map(n => n.id));
-    const queueMinusLive = fromQueue.filter(n => !liveIds.has(n.id));
+    const currentOrgId = opts.creds?.orgId ?? null;
+    const queueMinusLive = fromQueue.filter(n => {
+      if (liveIds.has(n.id)) return false;
+      // Org-scoped notices belong to the org that produced them. Without this,
+      // switching from a drained org to a funded one still rendered the old
+      // org's "credits exhausted", pointing at the wrong billing page — the
+      // live-supersedes rule above can't help, because a healthy org produces
+      // no live notice to supersede it with.
+      const notifOrgId = (n.dedupKey as { orgId?: string | null } | undefined)?.orgId;
+      if (notifOrgId != null && notifOrgId !== currentOrgId) return false;
+      return true;
+    });
     if (queueMinusLive.length !== fromQueue.length) {
-      log(`dropped ${fromQueue.length - queueMinusLive.length} stale queued balance notice(s) superseded by the live read`);
+      log(`dropped ${fromQueue.length - queueMinusLive.length} queued notice(s): superseded by the live read or belonging to another org`);
     }
     // Primary banner first so the user reads "Welcome back / <brief>" at the
     // top, then everything else (backend pushes, rules) below.

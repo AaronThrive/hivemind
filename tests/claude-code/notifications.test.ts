@@ -675,6 +675,42 @@ describe("enqueueNotification + drainSessionStart", () => {
     expect(rendered.indexOf("Explicit error")).toBeLessThan(rendered.indexOf("Unlabelled"));
   });
 
+  it("drops a queued notice that belongs to a different org", async () => {
+    // Observed in production: a "credits exhausted" notice enqueued while on a
+    // drained org still rendered after switching to a funded one, pointing at
+    // the OLD org's billing page. The live-supersedes rule cannot catch this —
+    // a healthy org produces no live notice to supersede it with.
+    await enqueueNotification({
+      id: "balance-exhausted",
+      severity: "warn",
+      title: "Hivemind credits exhausted — top up to keep capturing",
+      body: "Top up at https://deeplake.ai/OTHER-ORG/workspace/default/billing",
+      dedupKey: { reason: "balance-zero", orgId: "some-other-org" },
+    });
+
+    await drainSessionStart({ agent: "claude-code", creds: FRESH_CREDS, sessionId: "s-org" });
+
+    const rendered = writes.length ? JSON.parse(writes[0]).systemMessage ?? "" : "";
+    expect(rendered).not.toContain("credits exhausted");
+    expect(rendered).not.toContain("OTHER-ORG");
+    expect(readQueue().queue.length).toBe(0);
+  });
+
+  it("keeps a queued notice that belongs to the CURRENT org", async () => {
+    await enqueueNotification({
+      id: "balance-exhausted",
+      severity: "warn",
+      title: "Hivemind credits exhausted — top up to keep capturing",
+      body: "Top up now.",
+      dedupKey: { reason: "balance-zero", orgId: FRESH_CREDS.orgId },
+    });
+
+    await drainSessionStart({ agent: "claude-code", creds: FRESH_CREDS, sessionId: "s-org-2" });
+
+    expect(writes.length).toBe(1);
+    expect(JSON.parse(writes[0]).systemMessage).toContain("credits exhausted");
+  });
+
   it("renders actionable warnings ABOVE informational ones", async () => {
     // The production failure this guards: the "credits exhausted — top up"
     // line rendered under the welcome banner and the referral nudge, i.e.

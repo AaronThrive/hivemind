@@ -128,7 +128,12 @@ function maybeSignalBalanceExhausted(status: number, bodyText: string): void {
     transient: true,
     title: "Hivemind credits exhausted — top up to keep capturing",
     body: `Sessions are not being saved and memory recall is returning empty. Top up at ${billingUrl()} to restore capture and recall.`,
-    dedupKey: { reason: "balance-zero" },
+    // Carries the org so a notice enqueued under one org is never rendered
+    // after switching to another (observed: switching to a funded org still
+    // showed the previous org's "credits exhausted" and linked to ITS billing
+    // page). drainSessionStart drops queued notices whose org no longer
+    // matches the credentials in force.
+    dedupKey: { reason: "balance-zero", orgId: loadCredentials()?.orgId ?? null },
     // User-facing billing notice → user channel only. Never the model's
     // additionalContext: a "top up at <url>" instruction in the agent prompt
     // is a prompt-injection pattern external agents flag.
