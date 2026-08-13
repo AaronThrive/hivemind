@@ -78,9 +78,17 @@ let _signalledBalanceExhausted = false;
  * DedupKey carries the UTC date so the banner re-fires daily until the
  * user tops up, rather than firing once-ever and then going quiet.
  */
+/**
+ * The server's "out of credits" response: HTTP 402 whose body carries
+ * `balance_cents`. Single source of truth for both the session-start banner
+ * and the human-readable error message thrown to CLI callers.
+ */
+export function isBalanceExhausted(status: number, bodyText: string): boolean {
+  return status === 402 && bodyText.includes("balance_cents");
+}
+
 function maybeSignalBalanceExhausted(status: number, bodyText: string): void {
-  if (status !== 402) return;
-  if (!bodyText.includes("balance_cents")) return;
+  if (!isBalanceExhausted(status, bodyText)) return;
   if (_signalledBalanceExhausted) return;
   _signalledBalanceExhausted = true;
   log(`balance exhausted — enqueuing session-start banner (body=${bodyText.slice(0, 120)})`);
@@ -309,6 +317,18 @@ export class DeeplakeApi {
       // Surface a session-start banner for the "out of credits" case before
       // throwing — see maybeSignalBalanceExhausted's docstring for why.
       maybeSignalBalanceExhausted(resp.status, text);
+      // The out-of-credits 402 is the one server error a user can act on, and
+      // it is the one they are most likely to read raw: `hivemind goal list`
+      // and friends print this message straight to the terminal. Emitting the
+      // API's JSON body verbatim ("Query failed: 402: {"balance_cents":0,...}")
+      // made it look like an internal fault rather than "your account is out
+      // of credits" — reported 2026-08-12 in #platform. Every other status
+      // keeps the raw shape, which is what the debugging paths expect.
+      if (isBalanceExhausted(resp.status, text)) {
+        throw new Error(
+          `Hivemind credits exhausted — sessions are not being saved and memory recall returns empty. Top up at ${billingUrl()} to restore capture and recall.`,
+        );
+      }
       throw new Error(`Query failed: ${resp.status}: ${text.slice(0, 200)}`);
     }
     throw lastError ?? new Error("Query failed: max retries exceeded");
