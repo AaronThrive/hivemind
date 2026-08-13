@@ -594,6 +594,34 @@ describe("enqueueNotification + drainSessionStart", () => {
     expect(readQueue().queue.length).toBe(0);
   });
 
+  it("renders actionable warnings ABOVE informational ones", async () => {
+    // The production failure this guards: the "credits exhausted — top up"
+    // line rendered under the welcome banner and the referral nudge, i.e.
+    // exactly where the user has stopped reading. Reported 2026-08-12 in
+    // #platform as "I didn't receive an unprompted CTA to top up at any time".
+    await enqueueNotification({
+      id: "chatty-info",
+      severity: "info",
+      title: "Something informational",
+      body: "No action needed.",
+      dedupKey: { k: 1 },
+    });
+    await enqueueNotification({
+      id: "balance-exhausted",
+      severity: "warn",
+      title: "Hivemind credits exhausted — top up to keep capturing",
+      body: "Top up to restore capture and recall.",
+      dedupKey: { reason: "balance-zero" },
+    });
+
+    await drainSessionStart({ agent: "claude-code", creds: null });
+
+    expect(writes.length).toBe(1);
+    const rendered = JSON.parse(writes[0]).systemMessage as string;
+    expect(rendered.indexOf("credits exhausted"))
+      .toBeLessThan(rendered.indexOf("Something informational"));
+  });
+
   it("does NOT redeliver a queue item already shown (dedup by id+dedupKey)", async () => {
     const n: Notification = {
       id: "foo",
@@ -920,9 +948,11 @@ describe("backend source (GET /me/notifications)", () => {
 
     await drainSessionStart({ agent: "claude-code", creds: FRESH_CREDS });
 
-    expect(fetchCalls.length).toBe(1);
-    expect(fetchCalls[0].url).toContain("/me/notifications");
-    expect((fetchCalls[0].init?.headers as any)?.Authorization).toBe(`Bearer ${FRESH_CREDS.token}`);
+    // The drain also reads the balance (sources/balance.ts), so filter to the
+    // backend-notifications call rather than asserting a total call count.
+    const backendCalls = fetchCalls.filter(c => c.url.includes("/me/notifications"));
+    expect(backendCalls.length).toBe(1);
+    expect((backendCalls[0].init?.headers as any)?.Authorization).toBe(`Bearer ${FRESH_CREDS.token}`);
 
     expect(writes.length).toBe(1);
     // Backend pushes are userVisibleOnly — user channel, never the model's

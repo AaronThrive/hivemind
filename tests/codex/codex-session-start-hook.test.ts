@@ -41,6 +41,15 @@ vi.mock("../../src/skillify/local-manifest.js", async (importOriginal) => {
     countLocalManifestEntries: (...a: any[]) => localManifestMock(...a),
   };
 });
+// The notifications drain does its own network IO (org stats, backend pushes,
+// goals). These cases are about the hook's OWN output shape, so the drain is
+// stubbed to deliver nothing. Its merge into this hook's single JSON object is
+// covered by tests/codex/codex-notifications-merge.test.ts.
+vi.mock("../../src/notifications/index.js", () => ({
+  drainSessionStart: async () => undefined,
+  registerRule: () => undefined,
+}));
+vi.mock("../../src/notifications/state.js", () => ({ bumpSessionCount: () => 1 }));
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
   return { ...actual, spawn: (...a: any[]) => spawnMock(...a) };
@@ -68,7 +77,12 @@ async function runHook(env: Record<string, string | undefined> = {}): Promise<st
   console.log = (...args: any[]) => { collected.push(args.join(" ")); };
   try {
     await import("../../src/hooks/codex/session-start.js");
-    await new Promise(r => setImmediate(r));
+    // The hook is async past several awaits; poll until it writes (or gives
+    // up) rather than assuming a fixed number of microtask turns — a fixed
+    // wait silently leaks one test's output into the next test's capture.
+    for (let i = 0; i < 200 && collected.length === 0; i++) {
+      await new Promise(r => setTimeout(r, 5));
+    }
     return collected.join("\n") || null;
   } finally {
     console.log = originalLog;

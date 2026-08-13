@@ -153,28 +153,20 @@ describe("pickPrimaryBanner — welcome (default when savings ≤ 1M)", () => {
     expect(n!.id).toBe("welcome");
   });
 
-  it("merges a live low-balance line into the banner when balanceCents is below threshold", async () => {
+  // The balance warning is no longer a rider on this banner — it moved to
+  // sources/low-balance.ts so it can't inherit the banner's suppression
+  // rules (resume sessions, missing session_id, the 1h org-stats cache).
+  // Coverage lives in tests/claude-code/notifications-low-balance.test.ts.
+  it("never renders a balance line — that is the low-balance source's job now", async () => {
     orgStatsMock.mockResolvedValue({
       org:  { sessionsCount: 2, memoryRecallCount: 1, memorySearchBytes: 4_000 },
       user: { sessionsCount: 1, memoryRecallCount: 1, memorySearchBytes: 4_000 },
       balanceCents: 113,
     });
     const n = await pickPrimaryBanner("s-lowbal", FRESH_CREDS);
-    expect(n!.body).toContain("balance low");
-    expect(n!.body).toContain("$1.13");
-    expect(n!.body).toContain("Connected to org acme"); // merged, not replacing
-    expect(n!.userVisibleOnly).toBe(true);              // never the model channel
-  });
-
-  it("does NOT add a balance line when balance is healthy or unknown", async () => {
-    orgStatsMock.mockResolvedValue({
-      org:  { sessionsCount: 2, memoryRecallCount: 1, memorySearchBytes: 4_000 },
-      user: { sessionsCount: 1, memoryRecallCount: 1, memorySearchBytes: 4_000 },
-      balanceCents: 5_000,
-    });
-    expect((await pickPrimaryBanner("s-ok", FRESH_CREDS))!.body).not.toContain("balance low");
-    orgStatsMock.mockResolvedValue(null); // unknown
-    expect((await pickPrimaryBanner("s-unk", FRESH_CREDS))!.body).not.toContain("balance low");
+    expect(n!.body).not.toContain("balance low");
+    expect(n!.body).not.toContain("$1.13");
+    expect(n!.body).toContain("Connected to org acme");
   });
 
   it("drops comma-clause when userName is missing", async () => {
