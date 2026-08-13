@@ -34,6 +34,14 @@ const log = (msg: string) => _log("codex-session-start", msg);
  *  output is lost. */
 const DRAIN_DEADLINE_MS = 4000;
 
+/** Hard ceiling for the whole hook. Codex kills it at 10s (see buildHooksJson
+ *  in src/cli/install-codex.ts) and discards EVERYTHING when it does — the
+ *  user sees `SessionStart hook (failed) error: hook timed out after 10s` and
+ *  loses the login context AND any billing CTA. Observed in real sessions.
+ *  Bounding only the drain was not enough: the auto-pull, the org-token heal
+ *  and module init all sit outside it. Emit whatever we have by this point. */
+const HOOK_BUDGET_MS = 7000;
+
 /** Resolves after `ms`. `unref` so a pending timer can't hold the process
  *  open once the hook has written its output. */
 function deadline(ms: number): Promise<void> {
@@ -240,4 +248,40 @@ async function main(): Promise<void> {
   console.log(JSON.stringify(output));
 }
 
-main().catch((e) => { log(`fatal: ${e.message}`); process.exit(0); });
+/**
+ * Emit the minimal, always-correct output. Used when the hook blows its budget:
+ * a login line still beats codex discarding everything on a 10s timeout.
+ */
+function emitFallback(): void {
+  const creds = loadCredentials();
+  const additionalContext = creds?.token
+    ? `Hivemind: logged in as org ${creds.orgName ?? creds.orgId} (workspace: ${creds.workspaceId ?? "default"}).`
+    : "Hivemind: not logged in. Run `hivemind login` to enable shared memory + skill sharing.";
+  console.log(JSON.stringify({
+    hookSpecificOutput: { hookEventName: "SessionStart", additionalContext },
+  }));
+}
+
+// Watchdog: whatever happens inside main(), this process must produce its JSON
+// before Codex's 10s kill, because Codex discards the ENTIRE hook output on
+// timeout — login context and billing CTA alike.
+let wroteOutput = false;
+const originalLog = console.log.bind(console);
+console.log = (...args: unknown[]) => { wroteOutput = true; originalLog(...args); };
+
+const budget = setTimeout(() => {
+  if (wroteOutput) return;
+  log(`hook budget of ${HOOK_BUDGET_MS}ms exceeded — emitting fallback output`);
+  emitFallback();
+  process.exit(0);
+}, HOOK_BUDGET_MS);
+budget.unref?.();
+
+main()
+  .catch((e) => {
+    log(`fatal: ${e.message}`);
+    // Still give Codex something: a login line beats an empty hook cell.
+    if (!wroteOutput) emitFallback();
+    process.exit(0);
+  })
+  .finally(() => clearTimeout(budget));

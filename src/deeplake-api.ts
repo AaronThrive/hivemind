@@ -139,20 +139,26 @@ function maybeSignalBalanceExhausted(status: number, bodyText: string): void {
 }
 
 /**
- * Construct the org-scoped billing URL from persisted credentials. The
- * canonical shape is `https://deeplake.ai/{orgName}/workspace/{workspaceId}/billing`
- * — the org and workspace come from `~/.deeplake/credentials.json`. Falls
- * back to the bare host when creds are missing or malformed (better to
- * point at *something* than at a URL with literal `undefined` segments).
+ * Construct the org-scoped billing URL from persisted credentials:
+ * `https://deeplake.ai/{orgId}/workspace/{workspaceId}/billing`.
+ *
+ * Keyed on the org ID, NOT `orgName`. `orgName` is a human display name, not a
+ * slug — the API returns e.g. `"mvincig11's Organization"`, which rendered as
+ * `deeplake.ai/mvincig11's%20Organization/workspace/default/billing`: an
+ * apostrophe and an escaped space in a path segment. A dead link at the exact
+ * moment the user needs to top up defeats the purpose of the notice. The API
+ * exposes no slug field (checked `/organizations/{id}` — it returns only `id`
+ * and the display `name`), so the UUID is the one unambiguous, URL-safe
+ * identifier available.
+ *
+ * Falls back to the bare host when creds are missing or malformed — better to
+ * point at *something* than at a URL with literal `undefined` segments.
  */
 function billingUrl(): string {
   try {
     const c = loadCredentials();
-    if (c?.orgName && c?.workspaceId) {
-      // URI-encode in case anyone has an org/workspace name with reserved chars.
-      // workspaceId is typically a UUID; orgName is typically a slug, but
-      // encodeURIComponent is a cheap guard against future weirdness.
-      return `https://deeplake.ai/${encodeURIComponent(c.orgName)}/workspace/${encodeURIComponent(c.workspaceId)}/billing`;
+    if (c?.orgId && c?.workspaceId) {
+      return `https://deeplake.ai/${encodeURIComponent(c.orgId)}/workspace/${encodeURIComponent(c.workspaceId)}/billing`;
     }
   } catch { /* fall through to default */ }
   return "https://deeplake.ai";

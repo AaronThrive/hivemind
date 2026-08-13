@@ -80,6 +80,24 @@ async function runHook(): Promise<string[]> {
   }
 }
 
+/** Same as runHook but waits long enough for the hook budget to fire. */
+async function runHookSlow(): Promise<string[]> {
+  delete process.env.HIVEMIND_WIKI_WORKER;
+  vi.resetModules();
+  const collected: string[] = [];
+  const original = console.log;
+  console.log = (...args: any[]) => { collected.push(args.join(" ")); };
+  try {
+    await import("../../src/hooks/codex/session-start.js");
+    for (let i = 0; i < 300 && collected.length === 0; i++) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+    return collected;
+  } finally {
+    console.log = original;
+  }
+}
+
 beforeEach(() => {
   stdinMock.mockReset().mockResolvedValue({
     session_id: "sid-1", cwd: "/x", hook_event_name: "SessionStart", model: "gpt-5", source: "startup",
@@ -147,6 +165,17 @@ describe("codex session-start — notification delivery", () => {
     expect(ctx).toContain("logged in as org acme");
     expect(ctx.indexOf("credits exhausted")).toBeLessThan(ctx.indexOf("logged in as org acme"));
   });
+
+  it("still emits output when the drain hangs past the hook budget", async () => {
+    // Codex discards the ENTIRE hook output on a 10s timeout — the user sees
+    // "SessionStart hook (failed)" and loses the login context and any billing
+    // CTA with it. Observed in real sessions. A hung drain must not do that.
+    drainMock.mockImplementation(() => new Promise(() => { /* never settles */ }));
+    const writes = await runHookSlow();
+    expect(writes).toHaveLength(1);
+    const parsed = JSON.parse(writes[0]);
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("logged in as org acme");
+  }, 20_000);
 
   it("emits its normal single JSON object when there is nothing to notify", async () => {
     const writes = await runHook();

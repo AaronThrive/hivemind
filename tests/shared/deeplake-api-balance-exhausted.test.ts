@@ -92,7 +92,10 @@ describe("DeeplakeApi — 402 balance-exhausted handling", () => {
     expect(arg.title).toMatch(/credits exhausted/i);
     expect(arg.body).toMatch(/top up/i);
     // Org-scoped billing URL: deeplake.ai/{orgName}/workspace/{workspaceId}/billing
-    expect(arg.body).toContain("https://deeplake.ai/acme/workspace/default/billing");
+    // Keyed on the org ID: orgName is a display name and produced links like
+    // deeplake.ai/mvincig11's%20Organization/... in production.
+    expect(arg.body).toContain("https://deeplake.ai/org-uuid/workspace/default/billing");
+    expect(arg.body).not.toContain("acme");
     expect(arg.dedupKey.reason).toBe("balance-zero");
     // No date — transient mode means refire every session-start while the
     // 402 keeps re-enqueuing. Daily-rotation logic was unnecessary.

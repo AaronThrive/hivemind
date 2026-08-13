@@ -140,10 +140,20 @@ export async function drainSessionStart(opts: DrainOptions): Promise<void> {
     ]);
     const fromPrimary = primary != null ? [primary] : [];
     const fromLowBalance = lowBalance != null ? [lowBalance] : [];
+    // A live balance notice supersedes any queued one with the same id. The
+    // queued copy was written when a 402 fired in an earlier session and can
+    // name a DIFFERENT org than the one in force now (observed: a notice
+    // enqueued under one org rendered after switching to another, linking to
+    // the wrong billing page). The live read is scoped to current credentials.
+    const liveIds = new Set(fromLowBalance.map(n => n.id));
+    const queueMinusLive = fromQueue.filter(n => !liveIds.has(n.id));
+    if (queueMinusLive.length !== fromQueue.length) {
+      log(`dropped ${fromQueue.length - queueMinusLive.length} stale queued balance notice(s) superseded by the live read`);
+    }
     // Primary banner first so the user reads "Welcome back / <brief>" at the
     // top, then everything else (backend pushes, rules) below.
     const all: Notification[] = sortBySeverity([
-      ...fromPrimary, ...fromLowBalance, ...fromRules, ...fromQueue, ...fromBackend,
+      ...fromPrimary, ...fromLowBalance, ...fromRules, ...queueMinusLive, ...fromBackend,
     ]);
 
     const fresh = all.filter(n => !alreadyShown(state, n));

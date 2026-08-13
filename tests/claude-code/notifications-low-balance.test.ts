@@ -42,11 +42,16 @@ describe("pickLowBalanceNotice", () => {
     expect(n!.id).toBe("balance-low");
     expect(n!.severity).toBe("warn");
     expect(n!.title).toBe("Hivemind balance low — top up to avoid interruption");
+    // Keyed on the org ID, not the display name: orgName is "mvincig11's
+    // Organization" in the wild, which produced
+    // deeplake.ai/mvincig11's%20Organization/... - a dead link at exactly the
+    // moment the user needs to top up.
     expect(n!.body).toBe(
       "Only $1.13 of prepaid credit left. "
-      + "Top up at https://deeplake.ai/acme/workspace/ws-1/billing "
+      + "Top up at https://deeplake.ai/org-1/workspace/ws-1/billing "
       + "before capture and memory recall start failing.",
     );
+    expect(n!.body).not.toContain("acme");
     // Billing copy is for the human; it must never enter the model's context.
     expect(n!.userVisibleOnly).toBe(true);
     // Self-clearing: once topped up no fresh notice is produced, so recording
@@ -71,12 +76,21 @@ describe("pickLowBalanceNotice", () => {
     expect(await pickLowBalanceNotice(CREDS)).toBeNull();
   });
 
-  it("stays silent at or below zero — that is the 402 balance-exhausted path", async () => {
-    // Both notices firing would double up on the same problem.
-    fetchMock.mockResolvedValue(balanceResp("0"));
-    expect(await pickLowBalanceNotice(CREDS)).toBeNull();
-    fetchMock.mockResolvedValue(balanceResp("-500"));
-    expect(await pickLowBalanceNotice(CREDS)).toBeNull();
+  it("reports exhaustion LIVE at or below zero, in the session it applies to", async () => {
+    // Previously this returned null and left the "credits exhausted" notice
+    // entirely to the 402 queue path, which is drained at the NEXT
+    // SessionStart. So the session that broke told the user nothing, another
+    // agent could consume the queued copy first, and after an org switch the
+    // stale copy named the wrong org. A live read fixes all three.
+    for (const cents of ["0", "-500"]) {
+      fetchMock.mockResolvedValue(balanceResp(cents));
+      const n = await pickLowBalanceNotice(CREDS);
+      expect(n!.id).toBe("balance-exhausted");
+      expect(n!.severity).toBe("warn");
+      expect(n!.transient).toBe(true);
+      expect(n!.userVisibleOnly).toBe(true);
+      expect(n!.body).toContain("https://deeplake.ai/org-1/workspace/ws-1/billing");
+    }
   });
 
   it("stays silent — never guesses — when the header is absent or malformed", async () => {

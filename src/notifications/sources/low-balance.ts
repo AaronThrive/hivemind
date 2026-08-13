@@ -35,22 +35,40 @@ const log = (msg: string) => _log("notifications-low-balance", msg);
  *  LOW_BALANCE_THRESHOLD_CENTS. */
 export const LOW_BALANCE_THRESHOLD_CENTS = 200;
 
-/** Org-scoped billing page, falling back to the bare host when creds lack
- *  the org/workspace names. Mirrors deeplake-api.ts billingUrl(). */
+/** Org-scoped billing page. Keyed on the org ID: `orgName` is a display name
+ *  ("mvincig11's Organization"), not a slug, and produced a broken link. See
+ *  deeplake-api.ts billingUrl() for the full reasoning. */
 export function billingUrl(creds: Credentials): string {
-  if (creds.orgName && creds.workspaceId) {
-    return `https://deeplake.ai/${encodeURIComponent(creds.orgName)}/workspace/${encodeURIComponent(creds.workspaceId)}/billing`;
+  if (creds.orgId && creds.workspaceId) {
+    return `https://deeplake.ai/${encodeURIComponent(creds.orgId)}/workspace/${encodeURIComponent(creds.workspaceId)}/billing`;
   }
   return "https://deeplake.ai";
 }
 
 /**
- * Returns the low-balance notification, or null when the balance is healthy,
- * unknown, already exhausted, or the user is logged out.
+ * Returns the balance notice for THIS session, or null when the balance is
+ * healthy, unknown, or the user is logged out.
  *
- * dedupKey carries the rounded balance so a user who keeps working through a
- * draining balance sees the number move rather than the notice going quiet,
- * while repeated hook fires within one session collapse to one emission.
+ * Two outcomes, both decided from one live read:
+ *   • balance <= 0  → "credits exhausted"
+ *   • 0 < balance < threshold → "balance low"
+ *
+ * The exhausted case is checked live here, not only via the 402 queue path in
+ * deeplake-api. The queue is written when a 402 fires and drained at the NEXT
+ * SessionStart, which produced three user-visible failures:
+ *   1. You run out of credits and the session that broke tells you nothing —
+ *      you find out one session later, if at all.
+ *   2. The queue is shared across agents and drained once, so whichever agent
+ *      starts next consumes it and the other never shows it.
+ *   3. A notice enqueued under one org renders after you switch to another,
+ *      naming the wrong org and linking to the wrong billing page.
+ * A live read is scoped to the credentials in force right now, so it says the
+ * right thing in the session it applies to. The queue path stays as the
+ * fallback for when the balance read itself fails.
+ *
+ * dedupKey carries the balance so a user working through a draining balance
+ * sees the number move, while repeated hook fires within one session collapse
+ * to one emission.
  */
 export async function pickLowBalanceNotice(
   creds: Credentials | null | undefined,
@@ -61,7 +79,20 @@ export async function pickLowBalanceNotice(
     log("balance unknown — no notice");
     return null;
   }
-  if (balanceCents <= 0 || balanceCents >= LOW_BALANCE_THRESHOLD_CENTS) return null;
+  if (balanceCents <= 0) {
+    log(`balance exhausted (${balanceCents}c) — emitting live notice`);
+    return {
+      id: "balance-exhausted",
+      severity: "warn",
+      transient: true,
+      title: "Hivemind credits exhausted — top up to keep capturing",
+      body: "Sessions are not being saved and memory recall is returning empty. "
+        + `Top up at ${billingUrl(creds)} to restore capture and recall.`,
+      dedupKey: { reason: "balance-zero" },
+      userVisibleOnly: true,
+    };
+  }
+  if (balanceCents >= LOW_BALANCE_THRESHOLD_CENTS) return null;
   log(`balance low (${balanceCents}c) — emitting notice`);
   return {
     id: "balance-low",
