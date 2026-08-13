@@ -32,6 +32,38 @@ afterEach(() => {
 
 // ── query() ─────────────────────────────────────────────────────────────────
 
+import { describeNetworkFailure } from "../../src/deeplake-api.js";
+
+describe("describeNetworkFailure", () => {
+  // `hivemind goal list: fetch failed` was a real user-facing message. It came
+  // from surfacing undici's bare TypeError; the actual cause sits in .cause.
+  // Verified 2026-08-13: the same command under Codex's default
+  // `workspace-write` sandbox fails this way, and succeeds under
+  // `danger-full-access` - so the sandbox, not the network, is the usual cause.
+  it("names the underlying cause instead of the opaque 'fetch failed'", () => {
+    const e = Object.assign(new TypeError("fetch failed"), { cause: { code: "EAI_AGAIN" } });
+    const msg = describeNetworkFailure(e, "https://api.deeplake.ai").message;
+    expect(msg).toContain("Cannot reach the Deeplake API at https://api.deeplake.ai");
+    expect(msg).toContain("EAI_AGAIN");
+    expect(msg).toContain("sandbox");
+    expect(msg).not.toBe("fetch failed");
+  });
+
+  it("falls back to the cause message, then the error message", () => {
+    const withMsg = Object.assign(new TypeError("fetch failed"), {
+      cause: { message: "connect ECONNREFUSED 127.0.0.1:443" },
+    });
+    expect(describeNetworkFailure(withMsg, "https://x.test").message)
+      .toContain("connect ECONNREFUSED 127.0.0.1:443");
+    expect(describeNetworkFailure(new Error("boom"), "https://x.test").message)
+      .toContain("boom");
+  });
+
+  it("handles a non-Error throw without crashing", () => {
+    expect(describeNetworkFailure("nope", "https://x.test").message).toContain("nope");
+  });
+});
+
 describe("DeeplakeApi.query", () => {
   it("throws without fetching when an already-aborted signal is passed", async () => {
     const api = makeApi();

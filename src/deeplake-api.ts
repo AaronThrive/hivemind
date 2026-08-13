@@ -79,6 +79,31 @@ let _signalledBalanceExhausted = false;
  * user tops up, rather than firing once-ever and then going quiet.
  */
 /**
+ * Turn a thrown fetch error into something a human can act on.
+ *
+ * `fetch` rejects with a bare `TypeError: fetch failed` for every transport
+ * failure — the real cause is buried in `.cause`. Surfacing the bare message
+ * is how `hivemind goal list` came to print `hivemind goal list: fetch failed`,
+ * which tells the user nothing about what to do.
+ *
+ * The common case is not a broken network: it is an agent sandbox with
+ * outbound access disabled. Verified 2026-08-13 — the same command, same org,
+ * same server, run under Codex's default `workspace-write` sandbox prints
+ * `fetch failed`, and under `danger-full-access` returns normally. Name that
+ * possibility rather than making the user discover it.
+ */
+export function describeNetworkFailure(e: unknown, apiUrl: string): Error {
+  const cause = (e as { cause?: { code?: string; message?: string } } | null)?.cause;
+  const detail = cause?.code ?? cause?.message
+    ?? (e instanceof Error ? e.message : String(e));
+  return new Error(
+    `Cannot reach the Deeplake API at ${apiUrl} (${detail}). `
+    + `If you are running inside an agent sandbox, outbound network access may be blocked — `
+    + `Codex's default sandbox blocks it, so run the command in your own terminal instead.`,
+  );
+}
+
+/**
  * The server's "out of credits" response: HTTP 402 whose body carries
  * `balance_cents`. Single source of truth for both the session-start banner
  * and the human-readable error message thrown to CLI callers.
@@ -283,7 +308,7 @@ export class DeeplakeApi {
           lastError = new Error(`Query timeout after ${timeoutMs}ms`);
           throw lastError;
         }
-        lastError = e instanceof Error ? e : new Error(String(e));
+        lastError = describeNetworkFailure(e, this.apiUrl);
         if (attempt < MAX_RETRIES) {
           const delay = BASE_DELAY_MS * Math.pow(2, attempt) + Math.random() * 200;
           log(`query retry ${attempt + 1}/${MAX_RETRIES} (fetch error: ${lastError.message}) in ${delay.toFixed(0)}ms`);
