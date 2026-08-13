@@ -74,7 +74,9 @@ Empirical evidence preserved in the session JSONL captured by the probe — see 
   hook context: DEEPLAKE MEMORY: ...
 ```
 
-**v1 implication:** Codex has the SAME systemMessage user-visible channel as Claude Code. `src/hooks/codex/session-start.ts` was migrated from plain-text stdout to JSON output mirroring CC's dual-channel shape. No shared `delivery/codex.ts` adapter needed — the hook itself emits the JSON.
+**Implication (shipped):** Codex has the SAME `systemMessage` user-visible channel as Claude Code. `src/hooks/codex/session-start.ts` emits JSON mirroring CC's dual-channel shape, and drains the notifications framework with a `deliver` override, merging the channels rendered by `delivery/codex.ts::renderCodexChannels` into its single output object. The override exists because Codex's parser reads ONE object off the hook's stdout — a second write from an adapter would fail the parse and silently drop everything.
+
+The drain is bounded (`DRAIN_DEADLINE_MS` in that hook). Unlike Claude Code, where the drain is its own hook command, this hook also carries the memory/login context and Codex kills it at 10s, so a slow drain must never take the whole output down with it. Notifications that arrive after the deadline are re-queued for the next session.
 
 ### Hermes — verified upstream source (`~/.hermes/hermes-agent/`)
 
@@ -92,14 +94,16 @@ Empirical evidence preserved in the session JSONL captured by the probe — see 
 
 ## v1 delivery summary
 
-The only agent shipped today is **Claude Code**, via a dual-channel JSON emit:
+**Claude Code** and **Codex** both ship, each via a dual-channel JSON emit:
 
 - **`systemMessage` at the top level** of the JSON output — renders verbatim in the terminal as `SessionStart:startup says: <text>`. User-visible.
 - **`hookSpecificOutput.additionalContext`** (nested) — delivered to the model as a `<system-reminder>` block. Lets the model reason on follow-up turns ("you have a balance reminder, avoid expensive ops?").
 
 Both fields carry the same rendered text. The user definitely sees it; the model also receives it.
 
-Other agents (Codex, Cursor, Hermes, Pi, openclaw) are not yet wired. The findings above are the forward reference for what each adapter needs to do when it's prioritized.
+Codex carries the same two fields, with two differences: its `additionalContext` is ALSO user-visible (no model-only channel exists), and the drain is merged into the hook's own JSON rather than written by an adapter.
+
+The remaining agents (Cursor, Hermes, Pi, openclaw) are not wired. The findings above are the forward reference for what each adapter needs to do when it's prioritized.
 
 ## Probes
 

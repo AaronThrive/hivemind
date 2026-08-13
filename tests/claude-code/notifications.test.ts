@@ -619,7 +619,11 @@ describe("enqueueNotification + drainSessionStart", () => {
 
     expect(writes.length).toBe(1);
     const rendered = JSON.parse(writes[0]).systemMessage as string;
-    expect(rendered).toContain("$1.37");
+    // Assert presence BEFORE position: indexOf alone passes when the item
+    // that should come first is missing entirely (-1 < n).
+    expect(rendered).toContain("Hivemind balance low — top up to avoid interruption");
+    expect(rendered).toContain("Only $1.37 of prepaid credit left.");
+    expect(rendered).toContain("Welcome back");
     expect(rendered.indexOf("balance low")).toBeLessThan(rendered.indexOf("Welcome back"));
     // Billing copy must never reach the model's context.
     expect(JSON.parse(writes[0]).hookSpecificOutput.additionalContext).toBeUndefined();
@@ -666,6 +670,8 @@ describe("enqueueNotification + drainSessionStart", () => {
     await drainSessionStart({ agent: "claude-code", creds: null });
 
     const rendered = JSON.parse(writes[0]).systemMessage as string;
+    expect(rendered).toContain("Explicit error");
+    expect(rendered).toContain("Unlabelled");
     expect(rendered.indexOf("Explicit error")).toBeLessThan(rendered.indexOf("Unlabelled"));
   });
 
@@ -693,6 +699,8 @@ describe("enqueueNotification + drainSessionStart", () => {
 
     expect(writes.length).toBe(1);
     const rendered = JSON.parse(writes[0]).systemMessage as string;
+    expect(rendered).toContain("Hivemind credits exhausted — top up to keep capturing");
+    expect(rendered).toContain("Something informational");
     expect(rendered.indexOf("credits exhausted"))
       .toBeLessThan(rendered.indexOf("Something informational"));
   });

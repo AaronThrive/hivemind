@@ -41,8 +41,12 @@ describe("pickLowBalanceNotice", () => {
     expect(n).not.toBeNull();
     expect(n!.id).toBe("balance-low");
     expect(n!.severity).toBe("warn");
-    expect(n!.body).toContain("$1.13");
-    expect(n!.body).toContain("https://deeplake.ai/acme/workspace/ws-1/billing");
+    expect(n!.title).toBe("Hivemind balance low — top up to avoid interruption");
+    expect(n!.body).toBe(
+      "Only $1.13 of prepaid credit left. "
+      + "Top up at https://deeplake.ai/acme/workspace/ws-1/billing "
+      + "before capture and memory recall start failing.",
+    );
     // Billing copy is for the human; it must never enter the model's context.
     expect(n!.userVisibleOnly).toBe(true);
     // Self-clearing: once topped up no fresh notice is produced, so recording

@@ -109,8 +109,14 @@ describe("codex session-start — notification delivery", () => {
 
     expect(writes).toHaveLength(1);
     const parsed = JSON.parse(writes[0]);
-    expect(parsed.systemMessage).toContain("Hivemind credits exhausted");
-    expect(parsed.systemMessage).toContain("/billing");
+    // The whole rendered notification, not fragments — a partial match would
+    // still pass if the billing link (the entire point of the CTA) were lost.
+    expect(parsed.systemMessage).toBe(
+      `⚠️ ${BALANCE_NOTIFICATION.title}\n${BALANCE_NOTIFICATION.body}`,
+    );
+    expect(parsed.systemMessage).toContain(
+      "https://deeplake.ai/acme/workspace/default/billing",
+    );
     expect(parsed.hookSpecificOutput.hookEventName).toBe("SessionStart");
   });
 
@@ -137,6 +143,8 @@ describe("codex session-start — notification delivery", () => {
     });
     const parsed = JSON.parse((await runHook())[0]);
     const ctx: string = parsed.hookSpecificOutput.additionalContext;
+    expect(ctx).toContain(BALANCE_NOTIFICATION.title);
+    expect(ctx).toContain("logged in as org acme");
     expect(ctx.indexOf("credits exhausted")).toBeLessThan(ctx.indexOf("logged in as org acme"));
   });
 
