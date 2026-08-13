@@ -19,6 +19,14 @@ vi.mock("../../src/notifications/sources/resume-brief.js", () => ({
   pickResumeBrief: resumeMock,
 }));
 
+// The low-balance source makes its own uncached balance read; mock it so
+// these tests don't hit the network. Default: balance healthy/unknown.
+const { lowBalanceMock } = vi.hoisted(() => ({ lowBalanceMock: vi.fn() }));
+vi.mock("../../src/notifications/sources/low-balance.js", () => ({
+  pickLowBalanceNotice: lowBalanceMock,
+  LOW_BALANCE_THRESHOLD_CENTS: 200,
+}));
+
 import {
   drainSessionStart,
   enqueueNotification,
@@ -65,6 +73,8 @@ beforeEach(() => {
   // (which is empty in fresh sandbox) → savings == 0 → welcome wins.
   orgStatsMock.mockReset();
   orgStatsMock.mockResolvedValue(null);
+  lowBalanceMock.mockReset();
+  lowBalanceMock.mockResolvedValue(null);
   resumeMock.mockReset();
   resumeMock.mockResolvedValue(null);
 });
@@ -592,6 +602,71 @@ describe("enqueueNotification + drainSessionStart", () => {
     expect(payload.hookSpecificOutput.additionalContext).toContain("summary refresh");
 
     expect(readQueue().queue.length).toBe(0);
+  });
+
+  it("emits the low-balance notice through the drain, ahead of the welcome banner", async () => {
+    lowBalanceMock.mockResolvedValue({
+      id: "balance-low",
+      severity: "warn",
+      transient: true,
+      title: "Hivemind balance low — top up to avoid interruption",
+      body: "Only $1.37 of prepaid credit left.",
+      dedupKey: { balanceCents: 137 },
+      userVisibleOnly: true,
+    });
+
+    await drainSessionStart({ agent: "claude-code", creds: FRESH_CREDS, sessionId: "s-lb" });
+
+    expect(writes.length).toBe(1);
+    const rendered = JSON.parse(writes[0]).systemMessage as string;
+    expect(rendered).toContain("$1.37");
+    expect(rendered.indexOf("balance low")).toBeLessThan(rendered.indexOf("Welcome back"));
+    // Billing copy must never reach the model's context.
+    expect(JSON.parse(writes[0]).hookSpecificOutput.additionalContext).toBeUndefined();
+  });
+
+  it("hands claimed notifications to a deliver override instead of the agent adapter", async () => {
+    // Codex needs this: it accepts exactly one JSON object on a hook's
+    // stdout and its session-start hook already owns it, so the drain must
+    // not let an adapter write a second one.
+    const delivered: Notification[] = [];
+    await enqueueNotification({
+      id: "via-override",
+      title: "Routed",
+      body: "Through the override.",
+      dedupKey: { k: "ovr" },
+    });
+
+    await drainSessionStart({
+      agent: "codex",
+      creds: null,
+      deliver: (ns) => { delivered.push(...ns); },
+    });
+
+    expect(delivered.map(n => n.id)).toContain("via-override");
+    expect(writes.length).toBe(0);
+    expect(readQueue().queue.length).toBe(0);
+  });
+
+  it("treats an unlabelled notification as informational when ordering", async () => {
+    await enqueueNotification({
+      id: "no-severity",
+      title: "Unlabelled",
+      body: "No severity field at all.",
+      dedupKey: { k: 1 },
+    });
+    await enqueueNotification({
+      id: "explicit-error",
+      severity: "error",
+      title: "Explicit error",
+      body: "Act on this.",
+      dedupKey: { k: 2 },
+    });
+
+    await drainSessionStart({ agent: "claude-code", creds: null });
+
+    const rendered = JSON.parse(writes[0]).systemMessage as string;
+    expect(rendered.indexOf("Explicit error")).toBeLessThan(rendered.indexOf("Unlabelled"));
   });
 
   it("renders actionable warnings ABOVE informational ones", async () => {

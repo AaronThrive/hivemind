@@ -1,8 +1,19 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const bundleDir = join(process.cwd(), "harnesses", "codex", "bundle");
+
+// These run the REAL bundles as subprocesses. Point HOME at an empty temp dir
+// so they can't pick up the developer's ~/.deeplake/credentials.json and make
+// live API calls — with credentials present the session-start hook drains
+// notifications over the network, which under a loaded full-suite run pushed
+// the subprocess past its timeout and flaked.
+let TEMP_HOME = "";
+beforeAll(() => { TEMP_HOME = mkdtempSync(join(tmpdir(), "codex-integration-")); });
+afterAll(() => { if (TEMP_HOME) rmSync(TEMP_HOME, { recursive: true, force: true }); });
 
 /** Pipe JSON into a bundle and return parsed stdout. */
 function runHook(bundle: string, input: Record<string, unknown>, extraEnv: Record<string, string> = {}): string {
@@ -17,6 +28,8 @@ function runHook(bundle: string, input: Record<string, unknown>, extraEnv: Recor
       // Clear credentials to avoid API calls in tests
       HIVEMIND_TOKEN: "",
       HIVEMIND_ORG_ID: "",
+      HOME: TEMP_HOME,
+      USERPROFILE: TEMP_HOME,
       ...extraEnv,
     },
   });
@@ -38,6 +51,8 @@ function runBlockHook(bundle: string, input: Record<string, unknown>, extraEnv: 
         HIVEMIND_CAPTURE: "false",
         HIVEMIND_TOKEN: "",
         HIVEMIND_ORG_ID: "",
+        HOME: TEMP_HOME,
+        USERPROFILE: TEMP_HOME,
         ...extraEnv,
       },
     });

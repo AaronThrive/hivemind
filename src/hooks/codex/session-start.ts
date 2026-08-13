@@ -22,11 +22,26 @@ import { getInstalledVersion } from "../../utils/version-check.js";
 import { autoPullSkills } from "../../skillify/auto-pull.js";
 import { spawnGraphPullWorker } from "../../graph/spawn-pull-worker.js";
 import type { Notification } from "../../notifications/index.js";
-import { drainSessionStart, registerRule } from "../../notifications/index.js";
+import { drainSessionStart, enqueueNotification, registerRule } from "../../notifications/index.js";
 import { bumpSessionCount } from "../../notifications/state.js";
 import { referralInviteRule } from "../../notifications/rules/referral-invite.js";
 import { renderCodexChannels } from "../../notifications/delivery/codex.js";
 const log = (msg: string) => _log("codex-session-start", msg);
+
+/** How long this hook waits on the notifications drain before emitting
+ *  without it. Codex kills the hook at 10s and this hook also carries the
+ *  memory/login context, so the drain never gets to be the reason the whole
+ *  output is lost. */
+const DRAIN_DEADLINE_MS = 4000;
+
+/** Resolves after `ms`. `unref` so a pending timer can't hold the process
+ *  open once the hook has written its output. */
+function deadline(ms: number): Promise<void> {
+  return new Promise<void>(resolve => {
+    const t = setTimeout(resolve, ms);
+    t.unref?.();
+  });
+}
 
 // Same rule registration as Claude Code's notifications hook
 // (src/hooks/session-notifications.ts). Rules are pure — registering them
@@ -111,24 +126,39 @@ async function main(): Promise<void> {
   // claimed notifications via the `deliver` override and merge them into the
   // single output object below.
   //
-  // Run in parallel with the auto-pull so the drain's ~1.5s bounded fetches
-  // don't add to this blocking hook's wall time. drainSessionStart never
-  // throws (it catches internally); autoPullSkills never rejects.
+  // Run in parallel with the auto-pull so the drain's fetches don't add to
+  // this blocking hook's wall time. drainSessionStart never throws (it
+  // catches internally); autoPullSkills never rejects.
+  //
+  // Deadline: unlike Claude Code — where the drain is its own hook command —
+  // this hook must ALSO deliver the memory/login context, and Codex kills the
+  // hook at 10s (see buildHooksJson in src/cli/install-codex.ts). A slow
+  // drain (goals SQL retries behind a stalled network) would take the whole
+  // hook down with it and drop everything, so we stop waiting well before
+  // that. If the drain lands late, its notifications go back on the queue
+  // for the next session rather than being marked shown but never rendered.
   const rawSessionId = typeof input.session_id === "string" ? input.session_id.trim() : "";
   const sessionId = rawSessionId.length > 0 ? rawSessionId : undefined;
   const sessionCount = bumpSessionCount(sessionId);
   let notified: Notification[] = [];
+  let emitted = false;
+  const drained = drainSessionStart({
+    agent: "codex",
+    creds,
+    sessionId,
+    source: input.source,
+    sessionCount,
+    deliver: (ns) => {
+      if (!emitted) { notified = ns; return; }
+      log(`notifications arrived after the deadline — re-queuing ${ns.length}`);
+      for (const n of ns) enqueueNotification(n).catch(() => undefined);
+    },
+  });
   const [pullResult] = await Promise.all([
     autoPullSkills(),
-    drainSessionStart({
-      agent: "codex",
-      creds,
-      sessionId,
-      source: input.source,
-      sessionCount,
-      deliver: (ns) => { notified = ns; },
-    }),
+    Promise.race([drained, deadline(DRAIN_DEADLINE_MS)]),
   ]);
+  emitted = true;
   log(`autopull: pulled=${pullResult.pulled} skipped=${pullResult.skipped}`);
   log(`notifications: ${notified.length} claimed`);
 
