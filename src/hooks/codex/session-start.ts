@@ -21,7 +21,17 @@ import { log as _log } from "../../utils/debug.js";
 import { getInstalledVersion } from "../../utils/version-check.js";
 import { autoPullSkills } from "../../skillify/auto-pull.js";
 import { spawnGraphPullWorker } from "../../graph/spawn-pull-worker.js";
+import type { Notification } from "../../notifications/index.js";
+import { drainSessionStart, registerRule } from "../../notifications/index.js";
+import { bumpSessionCount } from "../../notifications/state.js";
+import { referralInviteRule } from "../../notifications/rules/referral-invite.js";
+import { renderCodexChannels } from "../../notifications/delivery/codex.js";
 const log = (msg: string) => _log("codex-session-start", msg);
+
+// Same rule registration as Claude Code's notifications hook
+// (src/hooks/session-notifications.ts). Rules are pure — registering them
+// costs nothing when none fire.
+registerRule(referralInviteRule);
 
 const __bundleDir = dirname(fileURLToPath(import.meta.url));
 // Codex DOES NOT have a model-only context channel for SessionStart hooks: any
@@ -89,8 +99,38 @@ async function main(): Promise<void> {
   // disk; the only per-call cost is the SQL round-trip. autoPullSkills
   // never rejects — all errors are swallowed inside. Hard opt-out:
   // HIVEMIND_AUTOPULL_DISABLED=1.
-  const pullResult = await autoPullSkills();
+  // Notifications drain. Until this landed, Codex users never saw ANY
+  // notification the framework produced — most damagingly the
+  // `balance-exhausted` banner enqueued by deeplake-api's 402 handler. The
+  // result was hivemind failing completely silently on Codex: captures and
+  // recalls returned nothing and no CTA to top up ever surfaced (reported
+  // 2026-08-12 in #platform).
+  //
+  // The drain writes nothing itself — Codex accepts exactly ONE JSON object
+  // on a hook's stdout and this hook already owns it, so we collect the
+  // claimed notifications via the `deliver` override and merge them into the
+  // single output object below.
+  //
+  // Run in parallel with the auto-pull so the drain's ~1.5s bounded fetches
+  // don't add to this blocking hook's wall time. drainSessionStart never
+  // throws (it catches internally); autoPullSkills never rejects.
+  const rawSessionId = typeof input.session_id === "string" ? input.session_id.trim() : "";
+  const sessionId = rawSessionId.length > 0 ? rawSessionId : undefined;
+  const sessionCount = bumpSessionCount(sessionId);
+  let notified: Notification[] = [];
+  const [pullResult] = await Promise.all([
+    autoPullSkills(),
+    drainSessionStart({
+      agent: "codex",
+      creds,
+      sessionId,
+      source: input.source,
+      sessionCount,
+      deliver: (ns) => { notified = ns; },
+    }),
+  ]);
   log(`autopull: pulled=${pullResult.pulled} skipped=${pullResult.skipped}`);
+  log(`notifications: ${notified.length} claimed`);
 
   let versionNotice = "";
   const current = getInstalledVersion(__bundleDir, ".codex-plugin");
@@ -150,13 +190,23 @@ async function main(): Promise<void> {
   const systemMessage = (!creds?.token && localMined > 0)
     ? `💡 ${localMined} ${skillNoun} mined from your local sessions live in ~/.claude/skills/. Run 'hivemind login' to share them with your team.`
     : undefined;
+
+  // Merge the drained notifications into the single JSON object Codex will
+  // accept. Notifications go FIRST in both channels — a "credits exhausted"
+  // warning must not be pushed below the routine login-state line.
+  const notifChannels = renderCodexChannels(notified);
+  const mergedSystemMessage = [notifChannels.systemMessage, systemMessage]
+    .filter(Boolean).join("\n\n");
+  const mergedContext = [notifChannels.additionalContext, additionalContext]
+    .filter(Boolean).join("\n\n");
+
   const output: Record<string, unknown> = {
     hookSpecificOutput: {
       hookEventName: "SessionStart",
-      additionalContext,
+      additionalContext: mergedContext,
     },
   };
-  if (systemMessage) output.systemMessage = systemMessage;
+  if (mergedSystemMessage) output.systemMessage = mergedSystemMessage;
   console.log(JSON.stringify(output));
 }
 

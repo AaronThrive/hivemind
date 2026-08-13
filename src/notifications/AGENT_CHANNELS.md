@@ -6,12 +6,14 @@ Research notes on each agent's harness behavior — what stdout / stderr / JSON 
 
 ## Current implementation status
 
-**Claude Code uses the `delivery/claude-code.ts` adapter via the notifications framework. Codex emits the same `systemMessage` JSON shape directly from its own session-start hook (no shared adapter — it's a per-hook concern, not a framework concern).** Other agents either lack a user-visible channel entirely (Cursor, Pi) or are blocked by upstream bugs (Hermes).
+**Claude Code and Codex both drain the notifications framework at SessionStart.** Claude Code runs `drainSessionStart` from its own hook command (`session-notifications.js`) and delivers via `delivery/claude-code.ts`. Codex cannot do that — Codex accepts exactly ONE JSON object on a hook's stdout and `session-start.js` already owns it — so that hook calls `drainSessionStart` with a `deliver` override and merges the rendered channels (`delivery/codex.ts::renderCodexChannels`) into its single output object. Other agents either lack a user-visible channel entirely (Cursor, Pi) or are blocked by upstream bugs (Hermes).
+
+Until 2026-08, Codex called the framework not at all: notifications were enqueued (e.g. `balance-exhausted` from deeplake-api's 402 handler) and never drained, so a Codex user whose org ran out of credits saw nothing — captures and recalls failed silently forever. Verified fixed against the real Codex TUI (0.147.0), which renders it as `• SessionStart (completed) says: ⚠️ Hivemind credits exhausted — top up to keep capturing`.
 
 | Agent | User-visible CTA shipped? | How | Roadmap |
 |---|---|---|---|
 | Claude Code | ✅ `delivery/claude-code.ts` via notifications framework (dual-channel JSON) | `systemMessage` + nested `hookSpecificOutput.additionalContext` | shipped |
-| Codex | ✅ in `src/hooks/codex/session-start.ts` directly | `systemMessage` + nested `hookSpecificOutput.additionalContext` | shipped |
+| Codex | ✅ full notifications drain in `src/hooks/codex/session-start.ts` (`deliver` override + `delivery/codex.ts`) | `systemMessage` + nested `hookSpecificOutput.additionalContext` | shipped |
 | Cursor | ❌ — Cursor's `sessionStart` hook API does not expose a user-visible channel (only `env` + `additional_context`) | model-visible only | not feasible without upstream change |
 | Hermes | ❌ — upstream bug: `on_session_start` return value discarded at `run_agent.py:9777-9786` | nothing surfaces | needs `pre_llm_call` migration or upstream fix |
 | Pi | ❌ — extension API has no user-visible session-start channel | model-visible via the extension's own context injection | not feasible without upstream change |

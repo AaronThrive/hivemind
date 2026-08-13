@@ -17,6 +17,7 @@
 
 import type { Agent, Notification } from "../types.js";
 import { emitClaudeCode } from "./claude-code.js";
+import { emitCodex } from "./codex.js";
 
 // Adapters now take notifications, not a pre-rendered string, so each
 // agent can decide per-channel rendering (e.g. user-visible-only items
@@ -28,6 +29,10 @@ export type EmitFn = (notifications: Notification[]) => void;
 
 const ADAPTERS: Record<Agent, EmitFn> = {
   "claude-code": emitClaudeCode,
+  // Codex's SessionStart hook already owns its stdout, so production passes
+  // a `deliver` override (see DrainOptions) and merges the rendered channels
+  // into its own JSON object. This adapter is the standalone-process path.
+  codex: emitCodex,
 };
 
 export function emit(agent: Agent, notifications: Notification[]): void {
