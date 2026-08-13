@@ -37,7 +37,14 @@ import { autoPullSkills } from "../../skillify/auto-pull.js";
 import { GOALS_INSTRUCTIONS_CLI } from "../shared/goals-instructions.js";
 import { spawnGraphPullWorker } from "../../graph/spawn-pull-worker.js";
 import { graphContextLine } from "../../graph/session-context.js";
+import type { Notification } from "../../notifications/index.js";
+import { drainSessionStart, registerRule } from "../../notifications/index.js";
+import { bumpSessionCount } from "../../notifications/state.js";
+import { referralInviteRule } from "../../notifications/rules/referral-invite.js";
+import { renderModelChannelContext } from "../../notifications/delivery/model-channel.js";
 const log = (msg: string) => _log("cursor-session-start", msg);
+
+registerRule(referralInviteRule);
 
 const __bundleDir = dirname(fileURLToPath(import.meta.url));
 // Hivemind requires its npm bin (`hivemind` from @deeplake/hivemind) on PATH.
@@ -244,12 +251,37 @@ async function main(): Promise<void> {
   // never parses the ~1 MB snapshot. Returns null when no graph exists for
   // this repo, in which case we append nothing. Without this, Cursor never
   // told the agent the graph existed — the silent gap A3 closes.
+  // Drain notifications before assembling the context string below.
+  // drainSessionStart never throws (it catches internally).
+  let notified: Notification[] = [];
+  {
+    const sid = input.session_id ?? input.conversation_id;
+    await drainSessionStart({
+      agent: "cursor",
+      creds,
+      sessionId: typeof sid === "string" && sid.trim() ? sid.trim() : undefined,
+      sessionCount: bumpSessionCount(typeof sid === "string" ? sid : undefined),
+      deliver: (ns) => { notified = ns; },
+    });
+    log(`notifications: ${notified.length} claimed`);
+  }
+
   const graphLine = graphContextLine(resolveCwd(input));
   const additionalContext = graphLine
     ? `${withRules}\n${graphLine}`
     : withRules;
 
-  console.log(JSON.stringify({ additional_context: additionalContext }));
+  // Notifications. Cursor has no user-visible channel (verified empirically —
+  // see src/notifications/delivery/cursor.ts), so billing state reaches the
+  // user only by being relayed by the model. Rendered as a status line, never
+  // as an imperative. Without this a Cursor user whose org ran out of credits
+  // had no signal at all: capture and recall silently returned nothing.
+  const notifContext = renderModelChannelContext(notified);
+  const finalContext = notifContext
+    ? `${notifContext}\n\n${additionalContext}`
+    : additionalContext;
+
+  console.log(JSON.stringify({ additional_context: finalContext }));
 }
 
 main().catch((e) => { log(`fatal: ${e.message}`); process.exit(0); });

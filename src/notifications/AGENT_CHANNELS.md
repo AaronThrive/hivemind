@@ -14,9 +14,9 @@ Until 2026-08, Codex called the framework not at all: notifications were enqueue
 |---|---|---|---|
 | Claude Code | ✅ `delivery/claude-code.ts` via notifications framework (dual-channel JSON) | `systemMessage` + nested `hookSpecificOutput.additionalContext` | shipped |
 | Codex | ✅ full notifications drain in `src/hooks/codex/session-start.ts` (`deliver` override + `delivery/codex.ts`) | `systemMessage` + nested `hookSpecificOutput.additionalContext` | shipped |
-| Cursor | ❌ — Cursor's `sessionStart` hook API does not expose a user-visible channel (only `env` + `additional_context`) | model-visible only | not feasible without upstream change |
-| Hermes | ❌ — upstream bug: `on_session_start` return value discarded at `run_agent.py:9777-9786` | nothing surfaces | needs `pre_llm_call` migration or upstream fix |
-| Pi | ❌ — extension API has no user-visible session-start channel | model-visible via the extension's own context injection | not feasible without upstream change |
+| Cursor | ⚠️ no user channel exists, but billing state now reaches the user VIA the model — `delivery/model-channel.ts` | top-level `additional_context` (model-only) | shipped |
+| Hermes | ⚠️ same as Cursor — delivered from the `pre_llm_call` capture hook (`on_session_start`'s return is still discarded upstream) | `{"context": ...}` (model-only) | shipped |
+| Pi | ❌ — extension API has no user-visible session-start channel, and the installed extension injects context only through a STATIC `~/.pi/agent/AGENTS.md`, so there is no per-session channel to carry a billing notice | static file only | needs pi extension-API research |
 | openclaw | TBD — research before implementing | TBD | TBD |
 
 When a new adapter lands: add the agent string to the `Agent` union in `types.ts`, create `delivery/<agent>.ts`, wire it into the dispatch table in `delivery/index.ts`. The notes below tell you exactly what shape each agent's harness needs.
@@ -86,11 +86,18 @@ The drain is bounded (`DRAIN_DEADLINE_MS` in that hook). Unlike Claude Code, whe
 - The actual model-visible context-injection point in Hermes is `pre_llm_call` (`run_agent.py:9890-9897`), where multiple callbacks' `{context: "..."}` returns are joined with `"\n\n"`.
 - **v1 implication:** Hermes cannot deliver a notification at session start through the existing `on_session_start` hook channel. Future option: register a `pre_llm_call` hook with framework-side `session_id`-keyed dedup (fire only on first turn of each session). Out of scope for v1.
 
-### Cursor — closed source
+### Cursor — closed source, verified empirically against cursor-agent 2026.08.11
 
-- `~/.cursor/hooks.json` accepts an array of commands per `sessionStart` — config shape supports multiple hooks.
-- Cursor 1.7+ docs describe `additional_context` as a single string field. Docs are silent on multi-hook merging behavior and stderr handling. No source available to verify.
-- **Implementation note:** behavior unknown; verify via the runnable probe in `probe/probe-cursor.js` before implementing.
+A marker probe was wired as an extra `sessionStart` command in `~/.cursor/hooks.json`, emitting a unique token through every plausible channel. `cursor-agent --yolo -p` was then run twice: once reading what printed to the user, once asking the model to echo any token it could see.
+
+| channel | result |
+|---|---|
+| top-level `additional_context` | ✅ reaches the **model** (token echoed back) |
+| top-level `systemMessage` | ❌ dropped |
+| nested `hookSpecificOutput.additionalContext` | ❌ dropped |
+| stderr | ❌ never shown |
+
+**Nothing reaches the user directly.** So a billing notice can only reach a Cursor user by being relayed by the model — which is what `delivery/model-channel.ts` does, rendering `userVisibleOnly` billing notices as a statement of fact rather than as an imperative addressed to the user. Verified in a real session: asked "is Hivemind working right now?", cursor-agent answered *"Session capture is not working — org Deeplake credits are exhausted — so top up or fix billing at https://deeplake.ai/…/billing"*.
 
 ## v1 delivery summary
 

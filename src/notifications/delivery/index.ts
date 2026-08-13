@@ -18,6 +18,7 @@
 import type { Agent, Notification } from "../types.js";
 import { emitClaudeCode } from "./claude-code.js";
 import { emitCodex } from "./codex.js";
+import { renderModelChannelContext } from "./model-channel.js";
 
 // Adapters now take notifications, not a pre-rendered string, so each
 // agent can decide per-channel rendering (e.g. user-visible-only items
@@ -33,6 +34,21 @@ const ADAPTERS: Record<Agent, EmitFn> = {
   // a `deliver` override (see DrainOptions) and merges the rendered channels
   // into its own JSON object. This adapter is the standalone-process path.
   codex: emitCodex,
+  // Cursor's session-start hook owns its single JSON object and appends the
+  // rendered context itself (see src/hooks/cursor/session-start.ts), so
+  // production always passes a `deliver` override. This adapter is the
+  // standalone-process path.
+  // Hermes delivers from its pre_llm_call capture hook (no user-visible
+  // session-start channel exists), always via a `deliver` override.
+  hermes: (notifications) => {
+    const context = renderModelChannelContext(notifications);
+    if (context) process.stdout.write(JSON.stringify({ context }));
+  },
+  cursor: (notifications) => {
+    const context = renderModelChannelContext(notifications);
+    if (!context) return;
+    process.stdout.write(JSON.stringify({ additional_context: context }));
+  },
 };
 
 export function emit(agent: Agent, notifications: Notification[]): void {
