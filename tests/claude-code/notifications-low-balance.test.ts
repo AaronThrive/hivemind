@@ -109,6 +109,12 @@ describe("pickLowBalanceNotice", () => {
     await pickLowBalanceNotice(CREDS);
     await pickLowBalanceNotice(CREDS);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls[0][0]).toBe("https://api.example.test/me/hivemind-stats");
+    // The header lives on the SQL endpoint, NOT /me/hivemind-stats. Verified
+    // 2026-08-13 against api.deeplake.ai: hivemind-stats never carries it, so
+    // org-stats.ts's balance read has silently been null in production.
+    expect(fetchMock.mock.calls[0][0])
+      .toBe("https://api.example.test/workspaces/ws-1/tables/query");
+    expect(fetchMock.mock.calls[0][1].method).toBe("POST");
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).query).toBe("SELECT 1");
   });
 });
