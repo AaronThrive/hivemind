@@ -52,6 +52,10 @@ const BILLING = {
 };
 
 async function runHook(): Promise<string[]> {
+  // The hook ends its lifecycle with process.exit(0). Importing it repeatedly
+  // would otherwise tear the vitest worker down mid-run ("process.exit
+  // unexpectedly called with 0"), which surfaced only under CI's timing.
+  const exitSpy = vi.spyOn(process, "exit").mockImplementation(((): never => undefined as never));
   const writes: string[] = [];
   const spy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: any) => {
     writes.push(typeof chunk === "string" ? chunk : chunk.toString());
@@ -65,6 +69,7 @@ async function runHook(): Promise<string[]> {
     }
   } finally {
     spy.mockRestore();
+    exitSpy.mockRestore();
   }
   return writes;
 }
