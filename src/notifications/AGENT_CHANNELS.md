@@ -120,11 +120,15 @@ A marker probe was wired as an extra `sessionStart` command in `~/.cursor/hooks.
 - **`systemMessage` at the top level** of the JSON output — renders verbatim in the terminal as `SessionStart:startup says: <text>`. User-visible.
 - **`hookSpecificOutput.additionalContext`** (nested) — delivered to the model as a `<system-reminder>` block. Lets the model reason on follow-up turns ("you have a balance reminder, avoid expensive ops?").
 
-Both fields carry the same rendered text. The user definitely sees it; the model also receives it.
+The two fields do NOT always carry the same text. `userVisibleOnly` notifications (billing copy, mined prose) go to `systemMessage` only and are withheld from `additionalContext`, so an adversarial session cannot influence what lands in a later session's model context.
 
-Codex carries the same two fields, with two differences: its `additionalContext` is ALSO user-visible (no model-only channel exists), and the drain is merged into the hook's own JSON rather than written by an adapter.
+Codex uses the same two field names but renders and scopes them differently:
 
-The remaining agents (Cursor, Hermes, Pi, openclaw) are not wired. The findings above are the forward reference for what each adapter needs to do when it's prioritized.
+- `systemMessage` → `warning: <text>`, inside the `• SessionStart (completed)` history cell — NOT Claude Code's `SessionStart:startup says:` line.
+- `additionalContext` → `hook context: <text>`, which is **also user-visible** (Codex has no model-only channel), so it is kept deliberately minimal.
+- `renderCodexChannels` applies the same `userVisibleOnly` split, and the drain is merged into the hook's own single JSON object rather than written by an adapter — Codex parses exactly one object per hook.
+
+Cursor, Hermes and Pi are wired too, each on the only channel its harness exposes — see their sections above. openclaw is not wired.
 
 ## Probes
 
