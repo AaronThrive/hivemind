@@ -6,15 +6,17 @@ Research notes on each agent's harness behavior — what stdout / stderr / JSON 
 
 ## Current implementation status
 
-**Claude Code uses the `delivery/claude-code.ts` adapter via the notifications framework. Codex emits the same `systemMessage` JSON shape directly from its own session-start hook (no shared adapter — it's a per-hook concern, not a framework concern).** Other agents either lack a user-visible channel entirely (Cursor, Pi) or are blocked by upstream bugs (Hermes).
+**Claude Code and Codex both drain the notifications framework at SessionStart.** Claude Code runs `drainSessionStart` from its own hook command (`session-notifications.js`) and delivers via `delivery/claude-code.ts`. Codex cannot do that — Codex accepts exactly ONE JSON object on a hook's stdout and `session-start.js` already owns it — so that hook calls `drainSessionStart` with a `deliver` override and merges the rendered channels (`delivery/codex.ts::renderCodexChannels`) into its single output object. Other agents either lack a user-visible channel entirely (Cursor, Pi) or are blocked by upstream bugs (Hermes).
+
+Until 2026-08, Codex called the framework not at all: notifications were enqueued (e.g. `balance-exhausted` from deeplake-api's 402 handler) and never drained, so a Codex user whose org ran out of credits saw nothing — captures and recalls failed silently forever. Verified fixed against the real Codex TUI (0.147.0), which renders it as `• SessionStart (completed) says: ⚠️ Hivemind credits exhausted — top up to keep capturing`.
 
 | Agent | User-visible CTA shipped? | How | Roadmap |
 |---|---|---|---|
 | Claude Code | ✅ `delivery/claude-code.ts` via notifications framework (dual-channel JSON) | `systemMessage` + nested `hookSpecificOutput.additionalContext` | shipped |
-| Codex | ✅ in `src/hooks/codex/session-start.ts` directly | `systemMessage` + nested `hookSpecificOutput.additionalContext` | shipped |
-| Cursor | ❌ — Cursor's `sessionStart` hook API does not expose a user-visible channel (only `env` + `additional_context`) | model-visible only | not feasible without upstream change |
-| Hermes | ❌ — upstream bug: `on_session_start` return value discarded at `run_agent.py:9777-9786` | nothing surfaces | needs `pre_llm_call` migration or upstream fix |
-| Pi | ❌ — extension API has no user-visible session-start channel | model-visible via the extension's own context injection | not feasible without upstream change |
+| Codex | ✅ full notifications drain in `src/hooks/codex/session-start.ts` (`deliver` override + `delivery/codex.ts`) | `systemMessage` + nested `hookSpecificOutput.additionalContext` | shipped |
+| Cursor | ⚠️ no user channel exists, but billing state now reaches the user VIA the model — `delivery/model-channel.ts` | top-level `additional_context` (model-only) | shipped |
+| Hermes | ⚠️ same as Cursor — delivered from the `pre_llm_call` capture hook (`on_session_start`'s return is still discarded upstream) | `{"context": ...}` (model-only) | shipped |
+| Pi | ✅ **real user-visible channel** — `ctx.ui.notify(message, "info"｜"warning"｜"error")` on `session_start`. The only non-Claude-Code harness that can tell the user directly. | `ctx.ui.notify` | shipped |
 | openclaw | TBD — research before implementing | TBD | TBD |
 
 When a new adapter lands: add the agent string to the `Agent` union in `types.ts`, create `delivery/<agent>.ts`, wire it into the dispatch table in `delivery/index.ts`. The notes below tell you exactly what shape each agent's harness needs.
@@ -72,7 +74,23 @@ Empirical evidence preserved in the session JSONL captured by the probe — see 
   hook context: DEEPLAKE MEMORY: ...
 ```
 
-**v1 implication:** Codex has the SAME systemMessage user-visible channel as Claude Code. `src/hooks/codex/session-start.ts` was migrated from plain-text stdout to JSON output mirroring CC's dual-channel shape. No shared `delivery/codex.ts` adapter needed — the hook itself emits the JSON.
+**Implication (shipped):** Codex has the SAME `systemMessage` user-visible channel as Claude Code. `src/hooks/codex/session-start.ts` emits JSON mirroring CC's dual-channel shape, and drains the notifications framework with a `deliver` override, merging the channels rendered by `delivery/codex.ts::renderCodexChannels` into its single output object. The override exists because Codex's parser reads ONE object off the hook's stdout — a second write from an adapter would fail the parse and silently drop everything.
+
+The drain is bounded (`DRAIN_DEADLINE_MS` in that hook). Unlike Claude Code, where the drain is its own hook command, this hook also carries the memory/login context and Codex kills it at 10s, so a slow drain must never take the whole output down with it. Notifications that arrive after the deadline are re-queued for the next session.
+
+### Pi — verified against the installed `@mariozechner/pi-coding-agent`
+
+`dist/core/extensions/types.d.ts` declares `notify(message: string, type?: "info" | "warning" | "error"): void` on the extension UI context, and `docs/extensions.md` shows it called from a `session_start` handler. That is a genuine user-visible toast — no model relay needed, unlike Cursor and Hermes.
+
+An earlier pass in this file claimed Pi had no user-visible channel. That was wrong: it was inferred from what our own extension happened to do (inject context via a static `~/.pi/agent/AGENTS.md`) rather than from pi's API. Read the harness's own typings before concluding a channel does not exist.
+
+The extension (`harnesses/pi/extension-source/hivemind.ts`) is raw TS with no non-builtin imports, so it cannot drain the queue itself. It spawns `harnesses/pi/bundle/notifications-worker.js` — the same pattern as autopull — and calls `ctx.ui.notify()` once per returned item, mapping our severity onto pi's. Verified in a real pi TUI session:
+
+```
+ Warning: ⚠️ Hivemind credits exhausted — top up to keep capturing
+ Sessions are not being saved and memory recall is returning empty. Top up at
+ https://deeplake.ai/<org>/workspace/default/billing to restore capture and recall.
+```
 
 ### Hermes — verified upstream source (`~/.hermes/hermes-agent/`)
 
@@ -82,22 +100,35 @@ Empirical evidence preserved in the session JSONL captured by the probe — see 
 - The actual model-visible context-injection point in Hermes is `pre_llm_call` (`run_agent.py:9890-9897`), where multiple callbacks' `{context: "..."}` returns are joined with `"\n\n"`.
 - **v1 implication:** Hermes cannot deliver a notification at session start through the existing `on_session_start` hook channel. Future option: register a `pre_llm_call` hook with framework-side `session_id`-keyed dedup (fire only on first turn of each session). Out of scope for v1.
 
-### Cursor — closed source
+### Cursor — closed source, verified empirically against cursor-agent 2026.08.11
 
-- `~/.cursor/hooks.json` accepts an array of commands per `sessionStart` — config shape supports multiple hooks.
-- Cursor 1.7+ docs describe `additional_context` as a single string field. Docs are silent on multi-hook merging behavior and stderr handling. No source available to verify.
-- **Implementation note:** behavior unknown; verify via the runnable probe in `probe/probe-cursor.js` before implementing.
+A marker probe was wired as an extra `sessionStart` command in `~/.cursor/hooks.json`, emitting a unique token through every plausible channel. `cursor-agent --yolo -p` was then run twice: once reading what printed to the user, once asking the model to echo any token it could see.
+
+| channel | result |
+|---|---|
+| top-level `additional_context` | ✅ reaches the **model** (token echoed back) |
+| top-level `systemMessage` | ❌ dropped |
+| nested `hookSpecificOutput.additionalContext` | ❌ dropped |
+| stderr | ❌ never shown |
+
+**Nothing reaches the user directly.** So a billing notice can only reach a Cursor user by being relayed by the model — which is what `delivery/model-channel.ts` does, rendering `userVisibleOnly` billing notices as a statement of fact rather than as an imperative addressed to the user. Verified in a real session: asked "is Hivemind working right now?", cursor-agent answered *"Session capture is not working — org Deeplake credits are exhausted — so top up or fix billing at https://deeplake.ai/…/billing"*.
 
 ## v1 delivery summary
 
-The only agent shipped today is **Claude Code**, via a dual-channel JSON emit:
+**Claude Code** and **Codex** both ship, each via a dual-channel JSON emit:
 
 - **`systemMessage` at the top level** of the JSON output — renders verbatim in the terminal as `SessionStart:startup says: <text>`. User-visible.
 - **`hookSpecificOutput.additionalContext`** (nested) — delivered to the model as a `<system-reminder>` block. Lets the model reason on follow-up turns ("you have a balance reminder, avoid expensive ops?").
 
-Both fields carry the same rendered text. The user definitely sees it; the model also receives it.
+The two fields do NOT always carry the same text. `userVisibleOnly` notifications (billing copy, mined prose) go to `systemMessage` only and are withheld from `additionalContext`, so an adversarial session cannot influence what lands in a later session's model context.
 
-Other agents (Codex, Cursor, Hermes, Pi, openclaw) are not yet wired. The findings above are the forward reference for what each adapter needs to do when it's prioritized.
+Codex uses the same two field names but renders and scopes them differently:
+
+- `systemMessage` → `warning: <text>`, inside the `• SessionStart (completed)` history cell — NOT Claude Code's `SessionStart:startup says:` line.
+- `additionalContext` → `hook context: <text>`, which is **also user-visible** (Codex has no model-only channel), so it is kept deliberately minimal.
+- `renderCodexChannels` applies the same `userVisibleOnly` split, and the drain is merged into the hook's own single JSON object rather than written by an adapter — Codex parses exactly one object per hook.
+
+Cursor, Hermes and Pi are wired too, each on the only channel its harness exposes — see their sections above. openclaw is not wired.
 
 ## Probes
 

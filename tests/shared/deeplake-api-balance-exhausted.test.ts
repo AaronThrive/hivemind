@@ -83,7 +83,7 @@ describe("DeeplakeApi — 402 balance-exhausted handling", () => {
       bodyResp(402, JSON.stringify({ balance_cents: 0, error: "insufficient balance, please top up" })),
     );
     const api = await makeApi();
-    await expect(api.query("SELECT 1")).rejects.toThrow(/Query failed: 402/);
+    await expect(api.query("SELECT 1")).rejects.toThrow(/Hivemind credits exhausted/);
 
     expect(enqueueNotificationMock).toHaveBeenCalledTimes(1);
     const arg = enqueueNotificationMock.mock.calls[0][0];
@@ -92,7 +92,10 @@ describe("DeeplakeApi — 402 balance-exhausted handling", () => {
     expect(arg.title).toMatch(/credits exhausted/i);
     expect(arg.body).toMatch(/top up/i);
     // Org-scoped billing URL: deeplake.ai/{orgName}/workspace/{workspaceId}/billing
-    expect(arg.body).toContain("https://deeplake.ai/acme/workspace/default/billing");
+    // Keyed on the org ID: orgName is a display name and produced links like
+    // deeplake.ai/mvincig11's%20Organization/... in production.
+    expect(arg.body).toContain("https://deeplake.ai/org-uuid/workspace/default/billing");
+    expect(arg.body).not.toContain("acme");
     expect(arg.dedupKey.reason).toBe("balance-zero");
     // No date — transient mode means refire every session-start while the
     // 402 keeps re-enqueuing. Daily-rotation logic was unnecessary.
@@ -105,20 +108,24 @@ describe("DeeplakeApi — 402 balance-exhausted handling", () => {
   });
 
   it("process-local dedup: a second 402 in the same process does not re-enqueue", async () => {
-    fetchMock.mockResolvedValue(
+    // A fresh Response per call: a Response body can only be read once, so
+    // reusing one instance would hand the 2nd and 3rd queries an empty body.
+    fetchMock.mockImplementation(async () =>
       bodyResp(402, JSON.stringify({ balance_cents: 0, error: "insufficient balance, please top up" })),
     );
     const api = await makeApi();
-    await expect(api.query("SELECT 1")).rejects.toThrow(/402/);
-    await expect(api.query("INSERT INTO sessions VALUES (1)")).rejects.toThrow(/402/);
-    await expect(api.query("SELECT 2")).rejects.toThrow(/402/);
+    await expect(api.query("SELECT 1")).rejects.toThrow(/credits exhausted/);
+    await expect(api.query("INSERT INTO sessions VALUES (1)")).rejects.toThrow(/credits exhausted/);
+    await expect(api.query("SELECT 2")).rejects.toThrow(/credits exhausted/);
     expect(enqueueNotificationMock).toHaveBeenCalledTimes(1);
   });
 
   it("does NOT enqueue when status is 402 but body lacks balance_cents (a different 402 reason)", async () => {
     fetchMock.mockResolvedValueOnce(bodyResp(402, JSON.stringify({ error: "some-other-402-cause" })));
     const api = await makeApi();
-    await expect(api.query("SELECT 1")).rejects.toThrow(/402/);
+    // No balance_cents in the body → not the out-of-credits case → the raw
+    // shape is kept so debugging paths still see the status + body.
+    await expect(api.query("SELECT 1")).rejects.toThrow(/Query failed: 402/);
     expect(enqueueNotificationMock).not.toHaveBeenCalled();
   });
 
@@ -146,7 +153,7 @@ describe("DeeplakeApi — 402 balance-exhausted handling", () => {
       bodyResp(402, JSON.stringify({ balance_cents: 0, error: "insufficient balance, please top up" })),
     );
     const api = await makeApi();
-    await expect(api.query("SELECT 1")).rejects.toThrow(/402/);
+    await expect(api.query("SELECT 1")).rejects.toThrow(/credits exhausted/);
     expect(enqueueNotificationMock).toHaveBeenCalledTimes(1);
     const arg = enqueueNotificationMock.mock.calls[0][0];
     expect(arg.body).toContain("https://deeplake.ai");
@@ -154,7 +161,7 @@ describe("DeeplakeApi — 402 balance-exhausted handling", () => {
     expect(arg.body).not.toContain("/workspace/");
   });
 
-  it("still throws the original Query failed error (caller's catch path unchanged)", async () => {
+  it("throws an actionable, human-readable error instead of the raw 402 JSON body", async () => {
     fetchMock.mockResolvedValueOnce(
       bodyResp(402, JSON.stringify({ balance_cents: 0, error: "insufficient balance, please top up" })),
     );
@@ -166,8 +173,14 @@ describe("DeeplakeApi — 402 balance-exhausted handling", () => {
       caught = e;
     }
     expect(caught).toBeInstanceOf(Error);
-    expect((caught as Error).message).toMatch(/Query failed: 402/);
-    expect((caught as Error).message).toMatch(/insufficient balance/);
+    // The out-of-credits 402 is printed raw by CLI callers (`hivemind goal
+    // list` etc.). Emitting the API body verbatim read as an internal fault
+    // rather than "you are out of credits" — reported 2026-08-12 in #platform.
+    const msg = (caught as Error).message;
+    expect(msg).toMatch(/Hivemind credits exhausted/);
+    expect(msg).toMatch(/Top up at https:\/\/deeplake\.ai\//);
+    expect(msg).not.toMatch(/balance_cents/);
+    expect(msg).not.toMatch(/Query failed/);
   });
 
   it("swallows enqueueNotification rejection: the .catch handler logs but never propagates", async () => {
@@ -181,7 +194,7 @@ describe("DeeplakeApi — 402 balance-exhausted handling", () => {
       bodyResp(402, JSON.stringify({ balance_cents: 0, error: "insufficient balance, please top up" })),
     );
     const api = await makeApi();
-    await expect(api.query("SELECT 1")).rejects.toThrow(/Query failed: 402/);
+    await expect(api.query("SELECT 1")).rejects.toThrow(/Hivemind credits exhausted/);
     expect(enqueueNotificationMock).toHaveBeenCalledTimes(1);
     // Flush the microtask queue so the .catch handler executes before the
     // test exits; otherwise the rejection would surface after assertions

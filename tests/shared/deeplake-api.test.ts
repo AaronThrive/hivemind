@@ -32,6 +32,49 @@ afterEach(() => {
 
 // ── query() ─────────────────────────────────────────────────────────────────
 
+import { describeNetworkFailure } from "../../src/deeplake-api.js";
+
+describe("describeNetworkFailure", () => {
+  // `hivemind goal list: fetch failed` was a real user-facing message. It came
+  // from surfacing undici's bare TypeError; the actual cause sits in .cause.
+  // Verified 2026-08-13: the same command under Codex's default
+  // `workspace-write` sandbox fails this way, and succeeds under
+  // `danger-full-access` - so the sandbox, not the network, is the usual cause.
+  it("names the underlying cause instead of the opaque 'fetch failed'", () => {
+    const e = Object.assign(new TypeError("fetch failed"), { cause: { code: "EAI_AGAIN" } });
+    // Assert the whole message: the host, the cause and the sandbox guidance
+    // are one user-facing contract, and a substring match would still pass if
+    // the actionable half went missing.
+    expect(describeNetworkFailure(e, "https://api.deeplake.ai").message).toBe(
+      "Cannot reach the Deeplake API at https://api.deeplake.ai (EAI_AGAIN). "
+      + "If you are running inside an agent sandbox, outbound network access may be blocked — "
+      + "Codex's default sandbox blocks it, so run the command in your own terminal instead.",
+    );
+  });
+
+  it("falls back to the cause message, then the error message", () => {
+    const withMsg = Object.assign(new TypeError("fetch failed"), {
+      cause: { message: "connect ECONNREFUSED 127.0.0.1:443" },
+    });
+    const sandboxHint = "If you are running inside an agent sandbox, outbound network access may be blocked — "
+      + "Codex's default sandbox blocks it, so run the command in your own terminal instead.";
+    expect(describeNetworkFailure(withMsg, "https://x.test").message).toBe(
+      `Cannot reach the Deeplake API at https://x.test (connect ECONNREFUSED 127.0.0.1:443). ${sandboxHint}`,
+    );
+    expect(describeNetworkFailure(new Error("boom"), "https://x.test").message).toBe(
+      `Cannot reach the Deeplake API at https://x.test (boom). ${sandboxHint}`,
+    );
+  });
+
+  it("handles a non-Error throw without crashing", () => {
+    expect(describeNetworkFailure("nope", "https://x.test").message).toBe(
+      "Cannot reach the Deeplake API at https://x.test (nope). "
+      + "If you are running inside an agent sandbox, outbound network access may be blocked — "
+      + "Codex's default sandbox blocks it, so run the command in your own terminal instead.",
+    );
+  });
+});
+
 describe("DeeplakeApi.query", () => {
   it("throws without fetching when an already-aborted signal is passed", async () => {
     const api = makeApi();

@@ -15,6 +15,14 @@ const getInstalledVersionMock = vi.fn();
 const autoUpdateMock = vi.fn();
 const localManifestMock = vi.fn();
 
+// The notifications drain does its own network IO. These cases are about the
+// hook's own additional_context payload, so it is stubbed to deliver nothing.
+// Delivery itself is covered by tests/shared/notifications-model-channel.test.ts.
+vi.mock("../../src/notifications/index.js", () => ({
+  drainSessionStart: async () => undefined,
+  registerRule: () => undefined,
+}));
+vi.mock("../../src/notifications/state.js", () => ({ bumpSessionCount: () => 1 }));
 vi.mock("../../src/utils/stdin.js", () => ({ readStdin: (...a: unknown[]) => stdinMock(...a) }));
 vi.mock("../../src/config.js", () => ({ loadConfig: (...a: unknown[]) => loadConfigMock(...a) }));
 vi.mock("../../src/commands/auth.js", () => ({
@@ -68,8 +76,11 @@ async function runHook(env: Record<string, string | undefined> = {}): Promise<vo
   }
   vi.resetModules();
   await import("../../src/hooks/cursor/session-start.js");
-  await new Promise(r => setImmediate(r));
-  await new Promise(r => setImmediate(r));
+  // Poll until the hook writes rather than assuming a fixed number of
+  // microtask turns — a fixed wait leaks one test's stdout into the next.
+  for (let i = 0; i < 200 && consoleLogMock.mock.calls.length === 0; i++) {
+    await new Promise(r => setTimeout(r, 5));
+  }
 }
 
 beforeEach(() => {

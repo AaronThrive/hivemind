@@ -78,9 +78,42 @@ let _signalledBalanceExhausted = false;
  * DedupKey carries the UTC date so the banner re-fires daily until the
  * user tops up, rather than firing once-ever and then going quiet.
  */
+/**
+ * Turn a thrown fetch error into something a human can act on.
+ *
+ * `fetch` rejects with a bare `TypeError: fetch failed` for every transport
+ * failure — the real cause is buried in `.cause`. Surfacing the bare message
+ * is how `hivemind goal list` came to print `hivemind goal list: fetch failed`,
+ * which tells the user nothing about what to do.
+ *
+ * The common case is not a broken network: it is an agent sandbox with
+ * outbound access disabled. Verified 2026-08-13 — the same command, same org,
+ * same server, run under Codex's default `workspace-write` sandbox prints
+ * `fetch failed`, and under `danger-full-access` returns normally. Name that
+ * possibility rather than making the user discover it.
+ */
+export function describeNetworkFailure(e: unknown, apiUrl: string): Error {
+  const cause = (e as { cause?: { code?: string; message?: string } } | null)?.cause;
+  const detail = cause?.code ?? cause?.message
+    ?? (e instanceof Error ? e.message : String(e));
+  return new Error(
+    `Cannot reach the Deeplake API at ${apiUrl} (${detail}). `
+    + `If you are running inside an agent sandbox, outbound network access may be blocked — `
+    + `Codex's default sandbox blocks it, so run the command in your own terminal instead.`,
+  );
+}
+
+/**
+ * The server's "out of credits" response: HTTP 402 whose body carries
+ * `balance_cents`. Single source of truth for both the session-start banner
+ * and the human-readable error message thrown to CLI callers.
+ */
+export function isBalanceExhausted(status: number, bodyText: string): boolean {
+  return status === 402 && bodyText.includes("balance_cents");
+}
+
 function maybeSignalBalanceExhausted(status: number, bodyText: string): void {
-  if (status !== 402) return;
-  if (!bodyText.includes("balance_cents")) return;
+  if (!isBalanceExhausted(status, bodyText)) return;
   if (_signalledBalanceExhausted) return;
   _signalledBalanceExhausted = true;
   log(`balance exhausted — enqueuing session-start banner (body=${bodyText.slice(0, 120)})`);
@@ -95,7 +128,12 @@ function maybeSignalBalanceExhausted(status: number, bodyText: string): void {
     transient: true,
     title: "Hivemind credits exhausted — top up to keep capturing",
     body: `Sessions are not being saved and memory recall is returning empty. Top up at ${billingUrl()} to restore capture and recall.`,
-    dedupKey: { reason: "balance-zero" },
+    // Carries the org so a notice enqueued under one org is never rendered
+    // after switching to another (observed: switching to a funded org still
+    // showed the previous org's "credits exhausted" and linked to ITS billing
+    // page). drainSessionStart drops queued notices whose org no longer
+    // matches the credentials in force.
+    dedupKey: { reason: "balance-zero", orgId: loadCredentials()?.orgId ?? null },
     // User-facing billing notice → user channel only. Never the model's
     // additionalContext: a "top up at <url>" instruction in the agent prompt
     // is a prompt-injection pattern external agents flag.
@@ -106,20 +144,26 @@ function maybeSignalBalanceExhausted(status: number, bodyText: string): void {
 }
 
 /**
- * Construct the org-scoped billing URL from persisted credentials. The
- * canonical shape is `https://deeplake.ai/{orgName}/workspace/{workspaceId}/billing`
- * — the org and workspace come from `~/.deeplake/credentials.json`. Falls
- * back to the bare host when creds are missing or malformed (better to
- * point at *something* than at a URL with literal `undefined` segments).
+ * Construct the org-scoped billing URL from persisted credentials:
+ * `https://deeplake.ai/{orgId}/workspace/{workspaceId}/billing`.
+ *
+ * Keyed on the org ID, NOT `orgName`. `orgName` is a human display name, not a
+ * slug — the API returns e.g. `"mvincig11's Organization"`, which rendered as
+ * `deeplake.ai/mvincig11's%20Organization/workspace/default/billing`: an
+ * apostrophe and an escaped space in a path segment. A dead link at the exact
+ * moment the user needs to top up defeats the purpose of the notice. The API
+ * exposes no slug field (checked `/organizations/{id}` — it returns only `id`
+ * and the display `name`), so the UUID is the one unambiguous, URL-safe
+ * identifier available.
+ *
+ * Falls back to the bare host when creds are missing or malformed — better to
+ * point at *something* than at a URL with literal `undefined` segments.
  */
 function billingUrl(): string {
   try {
     const c = loadCredentials();
-    if (c?.orgName && c?.workspaceId) {
-      // URI-encode in case anyone has an org/workspace name with reserved chars.
-      // workspaceId is typically a UUID; orgName is typically a slug, but
-      // encodeURIComponent is a cheap guard against future weirdness.
-      return `https://deeplake.ai/${encodeURIComponent(c.orgName)}/workspace/${encodeURIComponent(c.workspaceId)}/billing`;
+    if (c?.orgId && c?.workspaceId) {
+      return `https://deeplake.ai/${encodeURIComponent(c.orgId)}/workspace/${encodeURIComponent(c.workspaceId)}/billing`;
     }
   } catch { /* fall through to default */ }
   return "https://deeplake.ai";
@@ -275,7 +319,7 @@ export class DeeplakeApi {
           lastError = new Error(`Query timeout after ${timeoutMs}ms`);
           throw lastError;
         }
-        lastError = e instanceof Error ? e : new Error(String(e));
+        lastError = describeNetworkFailure(e, this.apiUrl);
         if (attempt < MAX_RETRIES) {
           const delay = BASE_DELAY_MS * Math.pow(2, attempt) + Math.random() * 200;
           log(`query retry ${attempt + 1}/${MAX_RETRIES} (fetch error: ${lastError.message}) in ${delay.toFixed(0)}ms`);
@@ -309,6 +353,18 @@ export class DeeplakeApi {
       // Surface a session-start banner for the "out of credits" case before
       // throwing — see maybeSignalBalanceExhausted's docstring for why.
       maybeSignalBalanceExhausted(resp.status, text);
+      // The out-of-credits 402 is the one server error a user can act on, and
+      // it is the one they are most likely to read raw: `hivemind goal list`
+      // and friends print this message straight to the terminal. Emitting the
+      // API's JSON body verbatim ("Query failed: 402: {"balance_cents":0,...}")
+      // made it look like an internal fault rather than "your account is out
+      // of credits" — reported 2026-08-12 in #platform. Every other status
+      // keeps the raw shape, which is what the debugging paths expect.
+      if (isBalanceExhausted(resp.status, text)) {
+        throw new Error(
+          `Hivemind credits exhausted — sessions are not being saved and memory recall returns empty. Top up at ${billingUrl()} to restore capture and recall.`,
+        );
+      }
       throw new Error(`Query failed: ${resp.status}: ${text.slice(0, 200)}`);
     }
     throw lastError ?? new Error("Query failed: max retries exceeded");

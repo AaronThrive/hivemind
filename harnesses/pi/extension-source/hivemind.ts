@@ -527,6 +527,48 @@ const PI_SKILLIFY_WORKER_PATH = join(homedir(), ".pi", "agent", "hivemind", "ski
 // directly — pi can't import the TS module (raw .ts, zero deps), so it
 // routes through this child process. Keeps pi's pulled skills layout +
 // symlink fan-out in lockstep with the other agents automatically.
+const PI_NOTIFICATIONS_WORKER_PATH = join(homedir(), ".pi", "agent", "hivemind", "notifications-worker.js");
+
+/**
+ * Drain hivemind notifications and show them to the USER via pi's
+ * `ctx.ui.notify`.
+ *
+ * Pi is the only non-Claude-Code harness with a real user-visible channel
+ * (`notify(message, "info" | "warning" | "error")` — see
+ * `@mariozechner/pi-coding-agent` dist/core/extensions/types.d.ts). Cursor and
+ * Hermes have none, so their billing notices have to be relayed by the model;
+ * on pi we can just tell the user, which is strictly better.
+ *
+ * This extension is raw TS with no non-builtin imports, so the drain runs in
+ * the bundled worker and we read its stdout — the same pattern as autopull.
+ * 6s cap; any failure is swallowed, because a missed notification must never
+ * cost the user their session.
+ */
+function runNotificationsWorker(sessionId: string, reason: string): Array<{ text: string; severity: string }> {
+  if (!existsSync(PI_NOTIFICATIONS_WORKER_PATH)) {
+    logHm(`notifications: worker bundle missing at ${PI_NOTIFICATIONS_WORKER_PATH} — skipping`);
+    return [];
+  }
+  try {
+    const result = spawnSync(process.execPath, [PI_NOTIFICATIONS_WORKER_PATH, sessionId, reason], {
+      encoding: "utf-8",
+      timeout: 6_000,
+      env: process.env,
+    });
+    if (result.error) {
+      logHm(`notifications: spawn failed (swallowed): ${result.error.message}`);
+      return [];
+    }
+    const parsed = JSON.parse((result.stdout || "").trim() || "{}");
+    const list = Array.isArray(parsed?.notifications) ? parsed.notifications : [];
+    logHm(`notifications: worker returned ${list.length}`);
+    return list;
+  } catch (e: any) {
+    logHm(`notifications: swallowed: ${e?.message ?? e}`);
+    return [];
+  }
+}
+
 const PI_AUTOPULL_WORKER_PATH = join(homedir(), ".pi", "agent", "hivemind", "autopull-worker.js");
 
 /**
@@ -1427,6 +1469,21 @@ export default function hivemindExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event: any, ctx: any) => {
     logHm(`session_start: fired (capture=${captureEnabled}, embed=${process.env.HIVEMIND_EMBEDDINGS !== "false"}, table=${SESSIONS_TABLE})`);
+
+    // Tell the user about anything that needs their attention — most
+    // importantly that the org is out of Deeplake credits, in which case
+    // capture and recall silently return nothing. Before this, a pi user got
+    // no signal at all. notify() is a real user-visible toast, so unlike
+    // Cursor and Hermes the notice does not have to go through the model.
+    try {
+      const sid = ctx?.sessionManager?.getSessionId?.() ?? "";
+      for (const n of runNotificationsWorker(String(sid ?? ""), String(_event?.reason ?? ""))) {
+        if (n?.text) ctx.ui?.notify?.(n.text, n.severity === "error" ? "error" : n.severity === "warning" ? "warning" : "info");
+      }
+    } catch (e: any) {
+      logHm(`notifications: notify swallowed: ${e?.message ?? e}`);
+    }
+
     let creds = loadCreds();
     if (!creds) {
       logHm(`session_start: no credentials at ~/.deeplake/credentials.json — capture disabled this session`);

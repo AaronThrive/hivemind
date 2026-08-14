@@ -99,7 +99,7 @@ export interface Rule {
 // real per-agent adapters — the union grows + a new file lands in
 // src/notifications/delivery/. AGENT_CHANNELS.md preserves the research
 // on each agent's harness behavior as a forward reference.
-export type Agent = "claude-code";
+export type Agent = "claude-code" | "codex" | "cursor" | "hermes" | "pi";
 
 export interface NotificationsState {
   /** id → { dedupKey JSON, ISO timestamp shown }. */

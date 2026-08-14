@@ -43,7 +43,52 @@ import type { Config } from "../../config.js";
 import { getInstalledVersion } from "../../utils/version-check.js";
 import { isHivemindPluginEnabled } from "../../utils/plugin-state.js";
 import { reactSkillOpt } from "../shared/skillopt-hook.js";
+import { closeSync, openSync } from "node:fs";
+import type { Notification } from "../../notifications/index.js";
+import { drainSessionStart } from "../../notifications/index.js";
+import { renderModelChannelContext } from "../../notifications/delivery/model-channel.js";
+import { sessionEventCachePath } from "../session-event-cache.js";
+import { loadCredentials } from "../../commands/auth.js";
 const log = (msg: string) => _log("hermes-capture", msg);
+
+/**
+ * Deliver session-start notifications on the FIRST pre_llm_call of a session.
+ *
+ * Hermes gives us no other route: its `on_session_start` hook return is
+ * discarded upstream, so a Hermes user whose org ran out of credits had no
+ * signal at all — capture and recall silently returned nothing, which is the
+ * exact failure this whole change set is about.
+ *
+ * Writes `{"context": "..."}` on stdout, the one shape
+ * `agent/shell_hooks.py::_parse_response` honours. Never throws: a failure
+ * here must not break capture.
+ */
+async function maybeEmitSessionNotifications(sessionId: string): Promise<void> {
+  try {
+    if (!sessionId) return;
+    const sentinel = join(dirname(sessionEventCachePath(sessionId)), `.notified-${sessionId}`);
+    // O_EXCL: first writer wins, so concurrent hook processes emit once.
+    try {
+      closeSync(openSync(sentinel, "wx"));
+    } catch {
+      return; // already delivered for this session
+    }
+    let notified: Notification[] = [];
+    await drainSessionStart({
+      agent: "hermes",
+      creds: loadCredentials(),
+      sessionId,
+      deliver: (ns) => { notified = ns; },
+    });
+    const context = renderModelChannelContext(notified);
+    if (context) {
+      process.stdout.write(JSON.stringify({ context }));
+      log(`notifications: delivered ${notified.length} via pre_llm_call context`);
+    }
+  } catch (e: unknown) {
+    log(`notification delivery failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
 function resolveEmbedDaemonPath(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "embeddings", "embed-daemon.js");
@@ -112,6 +157,19 @@ async function main(): Promise<void> {
   let reactPrompt: string | undefined; // the user's prompt = the SkillOpt reaction (fired after capture)
 
   if (event === "pre_llm_call") {
+    // Notification delivery. Hermes has NO user-visible session-start channel:
+    // `on_session_start`'s return value is discarded by the caller
+    // (run_agent.py), and `_parse_response` in agent/shell_hooks.py only
+    // honours `{"context": "..."}` — which the caller consumes for
+    // `pre_llm_call` alone. So billing state reaches a Hermes user the same
+    // way it reaches a Cursor user: relayed by the model, rendered as status
+    // rather than as an imperative. Delivered here, on the already-registered
+    // pre_llm_call hook, so no config change and no re-consent prompt.
+    //
+    // Once per session — the first pre_llm_call only, tracked by a sentinel
+    // beside the session cache, so every later turn stays silent.
+    await maybeEmitSessionNotifications(sessionId);
+
     const prompt = pickString(extra.prompt, extra.user_message, (extra.message as Record<string, unknown> | undefined)?.content);
     if (!prompt) { log(`pre_llm_call: no prompt found in extra`); return; }
     log(`user session=${sessionId}`);

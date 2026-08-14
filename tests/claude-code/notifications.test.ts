@@ -19,6 +19,14 @@ vi.mock("../../src/notifications/sources/resume-brief.js", () => ({
   pickResumeBrief: resumeMock,
 }));
 
+// The low-balance source makes its own uncached balance read; mock it so
+// these tests don't hit the network. Default: balance healthy/unknown.
+const { lowBalanceMock } = vi.hoisted(() => ({ lowBalanceMock: vi.fn() }));
+vi.mock("../../src/notifications/sources/low-balance.js", () => ({
+  pickLowBalanceNotice: lowBalanceMock,
+  LOW_BALANCE_THRESHOLD_CENTS: 200,
+}));
+
 import {
   drainSessionStart,
   enqueueNotification,
@@ -65,6 +73,8 @@ beforeEach(() => {
   // (which is empty in fresh sandbox) → savings == 0 → welcome wins.
   orgStatsMock.mockReset();
   orgStatsMock.mockResolvedValue(null);
+  lowBalanceMock.mockReset();
+  lowBalanceMock.mockResolvedValue(null);
   resumeMock.mockReset();
   resumeMock.mockResolvedValue(null);
 });
@@ -594,6 +604,143 @@ describe("enqueueNotification + drainSessionStart", () => {
     expect(readQueue().queue.length).toBe(0);
   });
 
+  it("emits the low-balance notice through the drain, ahead of the welcome banner", async () => {
+    lowBalanceMock.mockResolvedValue({
+      id: "balance-low",
+      severity: "warn",
+      transient: true,
+      title: "Hivemind balance low — top up to avoid interruption",
+      body: "Only $1.37 of prepaid credit left.",
+      dedupKey: { balanceCents: 137 },
+      userVisibleOnly: true,
+    });
+
+    await drainSessionStart({ agent: "claude-code", creds: FRESH_CREDS, sessionId: "s-lb" });
+
+    expect(writes.length).toBe(1);
+    const rendered = JSON.parse(writes[0]).systemMessage as string;
+    // Assert presence BEFORE position: indexOf alone passes when the item
+    // that should come first is missing entirely (-1 < n).
+    expect(rendered).toContain("Hivemind balance low — top up to avoid interruption");
+    expect(rendered).toContain("Only $1.37 of prepaid credit left.");
+    expect(rendered).toContain("Welcome back");
+    expect(rendered.indexOf("balance low")).toBeLessThan(rendered.indexOf("Welcome back"));
+    // Billing copy must never reach the model's context.
+    expect(JSON.parse(writes[0]).hookSpecificOutput.additionalContext).toBeUndefined();
+  });
+
+  it("hands claimed notifications to a deliver override instead of the agent adapter", async () => {
+    // Codex needs this: it accepts exactly one JSON object on a hook's
+    // stdout and its session-start hook already owns it, so the drain must
+    // not let an adapter write a second one.
+    const delivered: Notification[] = [];
+    await enqueueNotification({
+      id: "via-override",
+      title: "Routed",
+      body: "Through the override.",
+      dedupKey: { k: "ovr" },
+    });
+
+    await drainSessionStart({
+      agent: "codex",
+      creds: null,
+      deliver: (ns) => { delivered.push(...ns); },
+    });
+
+    expect(delivered.map(n => n.id)).toContain("via-override");
+    expect(writes.length).toBe(0);
+    expect(readQueue().queue.length).toBe(0);
+  });
+
+  it("treats an unlabelled notification as informational when ordering", async () => {
+    await enqueueNotification({
+      id: "no-severity",
+      title: "Unlabelled",
+      body: "No severity field at all.",
+      dedupKey: { k: 1 },
+    });
+    await enqueueNotification({
+      id: "explicit-error",
+      severity: "error",
+      title: "Explicit error",
+      body: "Act on this.",
+      dedupKey: { k: 2 },
+    });
+
+    await drainSessionStart({ agent: "claude-code", creds: null });
+
+    const rendered = JSON.parse(writes[0]).systemMessage as string;
+    expect(rendered).toContain("Explicit error");
+    expect(rendered).toContain("Unlabelled");
+    expect(rendered.indexOf("Explicit error")).toBeLessThan(rendered.indexOf("Unlabelled"));
+  });
+
+  it("drops a queued notice that belongs to a different org", async () => {
+    // Observed in production: a "credits exhausted" notice enqueued while on a
+    // drained org still rendered after switching to a funded one, pointing at
+    // the OLD org's billing page. The live-supersedes rule cannot catch this —
+    // a healthy org produces no live notice to supersede it with.
+    await enqueueNotification({
+      id: "balance-exhausted",
+      severity: "warn",
+      title: "Hivemind credits exhausted — top up to keep capturing",
+      body: "Top up at https://deeplake.ai/OTHER-ORG/workspace/default/billing",
+      dedupKey: { reason: "balance-zero", orgId: "some-other-org" },
+    });
+
+    await drainSessionStart({ agent: "claude-code", creds: FRESH_CREDS, sessionId: "s-org" });
+
+    const rendered = writes.length ? JSON.parse(writes[0]).systemMessage ?? "" : "";
+    expect(rendered).not.toContain("credits exhausted");
+    expect(rendered).not.toContain("OTHER-ORG");
+    expect(readQueue().queue.length).toBe(0);
+  });
+
+  it("keeps a queued notice that belongs to the CURRENT org", async () => {
+    await enqueueNotification({
+      id: "balance-exhausted",
+      severity: "warn",
+      title: "Hivemind credits exhausted — top up to keep capturing",
+      body: "Top up now.",
+      dedupKey: { reason: "balance-zero", orgId: FRESH_CREDS.orgId },
+    });
+
+    await drainSessionStart({ agent: "claude-code", creds: FRESH_CREDS, sessionId: "s-org-2" });
+
+    expect(writes.length).toBe(1);
+    expect(JSON.parse(writes[0]).systemMessage).toContain("credits exhausted");
+  });
+
+  it("renders actionable warnings ABOVE informational ones", async () => {
+    // The production failure this guards: the "credits exhausted — top up"
+    // line rendered under the welcome banner and the referral nudge, i.e.
+    // exactly where the user has stopped reading. Reported 2026-08-12 in
+    // #platform as "I didn't receive an unprompted CTA to top up at any time".
+    await enqueueNotification({
+      id: "chatty-info",
+      severity: "info",
+      title: "Something informational",
+      body: "No action needed.",
+      dedupKey: { k: 1 },
+    });
+    await enqueueNotification({
+      id: "balance-exhausted",
+      severity: "warn",
+      title: "Hivemind credits exhausted — top up to keep capturing",
+      body: "Top up to restore capture and recall.",
+      dedupKey: { reason: "balance-zero" },
+    });
+
+    await drainSessionStart({ agent: "claude-code", creds: null });
+
+    expect(writes.length).toBe(1);
+    const rendered = JSON.parse(writes[0]).systemMessage as string;
+    expect(rendered).toContain("Hivemind credits exhausted — top up to keep capturing");
+    expect(rendered).toContain("Something informational");
+    expect(rendered.indexOf("credits exhausted"))
+      .toBeLessThan(rendered.indexOf("Something informational"));
+  });
+
   it("does NOT redeliver a queue item already shown (dedup by id+dedupKey)", async () => {
     const n: Notification = {
       id: "foo",
@@ -920,9 +1067,11 @@ describe("backend source (GET /me/notifications)", () => {
 
     await drainSessionStart({ agent: "claude-code", creds: FRESH_CREDS });
 
-    expect(fetchCalls.length).toBe(1);
-    expect(fetchCalls[0].url).toContain("/me/notifications");
-    expect((fetchCalls[0].init?.headers as any)?.Authorization).toBe(`Bearer ${FRESH_CREDS.token}`);
+    // The drain also reads the balance (sources/balance.ts), so filter to the
+    // backend-notifications call rather than asserting a total call count.
+    const backendCalls = fetchCalls.filter(c => c.url.includes("/me/notifications"));
+    expect(backendCalls.length).toBe(1);
+    expect((backendCalls[0].init?.headers as any)?.Authorization).toBe(`Bearer ${FRESH_CREDS.token}`);
 
     expect(writes.length).toBe(1);
     // Backend pushes are userVisibleOnly — user channel, never the model's

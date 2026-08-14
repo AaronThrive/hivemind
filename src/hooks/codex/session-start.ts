@@ -21,7 +21,40 @@ import { log as _log } from "../../utils/debug.js";
 import { getInstalledVersion } from "../../utils/version-check.js";
 import { autoPullSkills } from "../../skillify/auto-pull.js";
 import { spawnGraphPullWorker } from "../../graph/spawn-pull-worker.js";
+import type { Notification } from "../../notifications/index.js";
+import { drainSessionStart, enqueueNotification, registerRule } from "../../notifications/index.js";
+import { bumpSessionCount } from "../../notifications/state.js";
+import { referralInviteRule } from "../../notifications/rules/referral-invite.js";
+import { renderCodexChannels } from "../../notifications/delivery/codex.js";
 const log = (msg: string) => _log("codex-session-start", msg);
+
+/** How long this hook waits on the notifications drain before emitting
+ *  without it. Codex kills the hook at 10s and this hook also carries the
+ *  memory/login context, so the drain never gets to be the reason the whole
+ *  output is lost. */
+const DRAIN_DEADLINE_MS = 4000;
+
+/** Hard ceiling for the whole hook. Codex kills it at 10s (see buildHooksJson
+ *  in src/cli/install-codex.ts) and discards EVERYTHING when it does — the
+ *  user sees `SessionStart hook (failed) error: hook timed out after 10s` and
+ *  loses the login context AND any billing CTA. Observed in real sessions.
+ *  Bounding only the drain was not enough: the auto-pull, the org-token heal
+ *  and module init all sit outside it. Emit whatever we have by this point. */
+const HOOK_BUDGET_MS = 7000;
+
+/** Resolves after `ms`. `unref` so a pending timer can't hold the process
+ *  open once the hook has written its output. */
+function deadline(ms: number): Promise<void> {
+  return new Promise<void>(resolve => {
+    const t = setTimeout(resolve, ms);
+    t.unref?.();
+  });
+}
+
+// Same rule registration as Claude Code's notifications hook
+// (src/hooks/session-notifications.ts). Rules are pure — registering them
+// costs nothing when none fire.
+registerRule(referralInviteRule);
 
 const __bundleDir = dirname(fileURLToPath(import.meta.url));
 // Codex DOES NOT have a model-only context channel for SessionStart hooks: any
@@ -89,8 +122,53 @@ async function main(): Promise<void> {
   // disk; the only per-call cost is the SQL round-trip. autoPullSkills
   // never rejects — all errors are swallowed inside. Hard opt-out:
   // HIVEMIND_AUTOPULL_DISABLED=1.
-  const pullResult = await autoPullSkills();
+  // Notifications drain. Until this landed, Codex users never saw ANY
+  // notification the framework produced — most damagingly the
+  // `balance-exhausted` banner enqueued by deeplake-api's 402 handler. The
+  // result was hivemind failing completely silently on Codex: captures and
+  // recalls returned nothing and no CTA to top up ever surfaced (reported
+  // 2026-08-12 in #platform).
+  //
+  // The drain writes nothing itself — Codex accepts exactly ONE JSON object
+  // on a hook's stdout and this hook already owns it, so we collect the
+  // claimed notifications via the `deliver` override and merge them into the
+  // single output object below.
+  //
+  // Run in parallel with the auto-pull so the drain's fetches don't add to
+  // this blocking hook's wall time. drainSessionStart never throws (it
+  // catches internally); autoPullSkills never rejects.
+  //
+  // Deadline: unlike Claude Code — where the drain is its own hook command —
+  // this hook must ALSO deliver the memory/login context, and Codex kills the
+  // hook at 10s (see buildHooksJson in src/cli/install-codex.ts). A slow
+  // drain (goals SQL retries behind a stalled network) would take the whole
+  // hook down with it and drop everything, so we stop waiting well before
+  // that. If the drain lands late, its notifications go back on the queue
+  // for the next session rather than being marked shown but never rendered.
+  const rawSessionId = typeof input.session_id === "string" ? input.session_id.trim() : "";
+  const sessionId = rawSessionId.length > 0 ? rawSessionId : undefined;
+  const sessionCount = bumpSessionCount(sessionId);
+  let notified: Notification[] = [];
+  let emitted = false;
+  const drained = drainSessionStart({
+    agent: "codex",
+    creds,
+    sessionId,
+    source: input.source,
+    sessionCount,
+    deliver: (ns) => {
+      if (!emitted) { notified = ns; return; }
+      log(`notifications arrived after the deadline — re-queuing ${ns.length}`);
+      for (const n of ns) enqueueNotification(n).catch(() => undefined);
+    },
+  });
+  const [pullResult] = await Promise.all([
+    autoPullSkills(),
+    Promise.race([drained, deadline(DRAIN_DEADLINE_MS)]),
+  ]);
+  emitted = true;
   log(`autopull: pulled=${pullResult.pulled} skipped=${pullResult.skipped}`);
+  log(`notifications: ${notified.length} claimed`);
 
   let versionNotice = "";
   const current = getInstalledVersion(__bundleDir, ".codex-plugin");
@@ -150,14 +228,60 @@ async function main(): Promise<void> {
   const systemMessage = (!creds?.token && localMined > 0)
     ? `💡 ${localMined} ${skillNoun} mined from your local sessions live in ~/.claude/skills/. Run 'hivemind login' to share them with your team.`
     : undefined;
+
+  // Merge the drained notifications into the single JSON object Codex will
+  // accept. Notifications go FIRST in both channels — a "credits exhausted"
+  // warning must not be pushed below the routine login-state line.
+  const notifChannels = renderCodexChannels(notified);
+  const mergedSystemMessage = [notifChannels.systemMessage, systemMessage]
+    .filter(Boolean).join("\n\n");
+  const mergedContext = [notifChannels.additionalContext, additionalContext]
+    .filter(Boolean).join("\n\n");
+
   const output: Record<string, unknown> = {
     hookSpecificOutput: {
       hookEventName: "SessionStart",
-      additionalContext,
+      additionalContext: mergedContext,
     },
   };
-  if (systemMessage) output.systemMessage = systemMessage;
+  if (mergedSystemMessage) output.systemMessage = mergedSystemMessage;
   console.log(JSON.stringify(output));
 }
 
-main().catch((e) => { log(`fatal: ${e.message}`); process.exit(0); });
+/**
+ * Emit the minimal, always-correct output. Used when the hook blows its budget:
+ * a login line still beats codex discarding everything on a 10s timeout.
+ */
+function emitFallback(): void {
+  const creds = loadCredentials();
+  const additionalContext = creds?.token
+    ? `Hivemind: logged in as org ${creds.orgName ?? creds.orgId} (workspace: ${creds.workspaceId ?? "default"}).`
+    : "Hivemind: not logged in. Run `hivemind login` to enable shared memory + skill sharing.";
+  console.log(JSON.stringify({
+    hookSpecificOutput: { hookEventName: "SessionStart", additionalContext },
+  }));
+}
+
+// Watchdog: whatever happens inside main(), this process must produce its JSON
+// before Codex's 10s kill, because Codex discards the ENTIRE hook output on
+// timeout — login context and billing CTA alike.
+let wroteOutput = false;
+const originalLog = console.log.bind(console);
+console.log = (...args: unknown[]) => { wroteOutput = true; originalLog(...args); };
+
+const budget = setTimeout(() => {
+  if (wroteOutput) return;
+  log(`hook budget of ${HOOK_BUDGET_MS}ms exceeded — emitting fallback output`);
+  emitFallback();
+  process.exit(0);
+}, HOOK_BUDGET_MS);
+budget.unref?.();
+
+main()
+  .catch((e) => {
+    log(`fatal: ${e.message}`);
+    // Still give Codex something: a login line beats an empty hook cell.
+    if (!wroteOutput) emitFallback();
+    process.exit(0);
+  })
+  .finally(() => clearTimeout(budget));

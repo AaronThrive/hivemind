@@ -371,6 +371,7 @@ for (const h of hermesAll) {
 // bundle synchronously from session_start.
 const piWorker = [
   { entry: "dist/src/hooks/pi/wiki-worker.js", out: "wiki-worker" },
+  { entry: "dist/src/hooks/pi/notifications-worker.js", out: "notifications-worker" },
   { entry: "dist/src/skillify/skillify-worker.js", out: "skillify-worker" },
   { entry: "dist/src/skillify/autopull-worker.js", out: "autopull-worker" },
   // SkillOpt worker — pi spawns it on a user reaction (the extension can't import the
