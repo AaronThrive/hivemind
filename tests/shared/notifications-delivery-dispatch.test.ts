@@ -79,8 +79,20 @@ describe("emit — per-agent shape", () => {
     expect(p.additional_context).toBeUndefined();
   });
 
+  it("pi: {notifications:[{text,severity}]} — its own user-visible notify channel", () => {
+    const { writes } = captureStdout();
+    emit("pi", [BILLING]);
+    const p = JSON.parse(writes.join(""));
+    // Pi is the only non-Claude-Code harness with a real user-visible channel
+    // (ctx.ui.notify), so the notice goes to the USER verbatim — it does not
+    // have to be laundered into a status line the way Cursor/Hermes do.
+    expect(p.notifications[0].text).toContain("Hivemind credits exhausted");
+    expect(p.notifications[0].text).toContain("Top up at");
+    expect(p.notifications[0].severity).toBe("warning");
+  });
+
   it("writes nothing at all when there is nothing deliverable", () => {
-    for (const agent of ["claude-code", "codex", "cursor", "hermes"] as const) {
+    for (const agent of ["claude-code", "codex", "cursor", "hermes", "pi"] as const) {
       const { writes } = captureStdout();
       emit(agent, []);
       expect(writes).toEqual([]);

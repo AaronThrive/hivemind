@@ -16,7 +16,7 @@ Until 2026-08, Codex called the framework not at all: notifications were enqueue
 | Codex | ✅ full notifications drain in `src/hooks/codex/session-start.ts` (`deliver` override + `delivery/codex.ts`) | `systemMessage` + nested `hookSpecificOutput.additionalContext` | shipped |
 | Cursor | ⚠️ no user channel exists, but billing state now reaches the user VIA the model — `delivery/model-channel.ts` | top-level `additional_context` (model-only) | shipped |
 | Hermes | ⚠️ same as Cursor — delivered from the `pre_llm_call` capture hook (`on_session_start`'s return is still discarded upstream) | `{"context": ...}` (model-only) | shipped |
-| Pi | ❌ — extension API has no user-visible session-start channel, and the installed extension injects context only through a STATIC `~/.pi/agent/AGENTS.md`, so there is no per-session channel to carry a billing notice | static file only | needs pi extension-API research |
+| Pi | ✅ **real user-visible channel** — `ctx.ui.notify(message, "info"｜"warning"｜"error")` on `session_start`. The only non-Claude-Code harness that can tell the user directly. | `ctx.ui.notify` | shipped |
 | openclaw | TBD — research before implementing | TBD | TBD |
 
 When a new adapter lands: add the agent string to the `Agent` union in `types.ts`, create `delivery/<agent>.ts`, wire it into the dispatch table in `delivery/index.ts`. The notes below tell you exactly what shape each agent's harness needs.
@@ -77,6 +77,20 @@ Empirical evidence preserved in the session JSONL captured by the probe — see 
 **Implication (shipped):** Codex has the SAME `systemMessage` user-visible channel as Claude Code. `src/hooks/codex/session-start.ts` emits JSON mirroring CC's dual-channel shape, and drains the notifications framework with a `deliver` override, merging the channels rendered by `delivery/codex.ts::renderCodexChannels` into its single output object. The override exists because Codex's parser reads ONE object off the hook's stdout — a second write from an adapter would fail the parse and silently drop everything.
 
 The drain is bounded (`DRAIN_DEADLINE_MS` in that hook). Unlike Claude Code, where the drain is its own hook command, this hook also carries the memory/login context and Codex kills it at 10s, so a slow drain must never take the whole output down with it. Notifications that arrive after the deadline are re-queued for the next session.
+
+### Pi — verified against the installed `@mariozechner/pi-coding-agent`
+
+`dist/core/extensions/types.d.ts` declares `notify(message: string, type?: "info" | "warning" | "error"): void` on the extension UI context, and `docs/extensions.md` shows it called from a `session_start` handler. That is a genuine user-visible toast — no model relay needed, unlike Cursor and Hermes.
+
+An earlier pass in this file claimed Pi had no user-visible channel. That was wrong: it was inferred from what our own extension happened to do (inject context via a static `~/.pi/agent/AGENTS.md`) rather than from pi's API. Read the harness's own typings before concluding a channel does not exist.
+
+The extension (`harnesses/pi/extension-source/hivemind.ts`) is raw TS with no non-builtin imports, so it cannot drain the queue itself. It spawns `harnesses/pi/bundle/notifications-worker.js` — the same pattern as autopull — and calls `ctx.ui.notify()` once per returned item, mapping our severity onto pi's. Verified in a real pi TUI session:
+
+```
+ Warning: ⚠️ Hivemind credits exhausted — top up to keep capturing
+ Sessions are not being saved and memory recall is returning empty. Top up at
+ https://deeplake.ai/<org>/workspace/default/billing to restore capture and recall.
+```
 
 ### Hermes — verified upstream source (`~/.hermes/hermes-agent/`)
 

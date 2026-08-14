@@ -19,6 +19,7 @@ import type { Agent, Notification } from "../types.js";
 import { emitClaudeCode } from "./claude-code.js";
 import { emitCodex } from "./codex.js";
 import { renderModelChannelContext } from "./model-channel.js";
+import { renderNotifications } from "../format.js";
 
 // Adapters now take notifications, not a pre-rendered string, so each
 // agent can decide per-channel rendering (e.g. user-visible-only items
@@ -43,6 +44,17 @@ const ADAPTERS: Record<Agent, EmitFn> = {
   hermes: (notifications) => {
     const context = renderModelChannelContext(notifications);
     if (context) process.stdout.write(JSON.stringify({ context }));
+  },
+  // Pi is the one non-Claude-Code harness with a real user-visible channel
+  // (ctx.ui.notify). Its extension spawns src/hooks/pi/notifications-worker.ts
+  // and calls notify() per item, so delivery always goes through a `deliver`
+  // override; this adapter is the standalone-process path.
+  pi: (notifications) => {
+    // No empty-guard: emit() already returns early on an empty batch, and
+    // renderNotifications of a non-empty batch is always non-empty. (Cursor
+    // and Hermes DO need one — their renderer can filter everything out.)
+    const text = renderNotifications(notifications);
+    process.stdout.write(JSON.stringify({ notifications: [{ text, severity: "warning" }] }));
   },
   cursor: (notifications) => {
     const context = renderModelChannelContext(notifications);

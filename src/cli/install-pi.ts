@@ -58,6 +58,7 @@ const AUTOPULL_WORKER_PATH = join(WIKI_WORKER_DIR, "autopull-worker.js");
 // recently-used org skill and publish an improvement. Same shared module CC ships; pi
 // can't import the raw-.ts trigger so it shells this bundle. Sibling of the others.
 const SKILLOPT_WORKER_PATH = join(WIKI_WORKER_DIR, "skillopt-worker.js");
+const NOTIFICATIONS_WORKER_PATH = join(WIKI_WORKER_DIR, "notifications-worker.js");
 
 const HIVEMIND_BLOCK_BODY = `${HIVEMIND_BLOCK_START}
 ## Hivemind Memory
@@ -140,6 +141,13 @@ export function installPi(): void {
     ensureDir(WIKI_WORKER_DIR);
     copyFileSync(srcSkilloptWorker, SKILLOPT_WORKER_PATH);
   }
+  // Notification drain for pi's user-visible ctx.ui.notify channel.
+  const srcNotificationsWorker = join(pkgRoot(), "harnesses", "pi", "bundle", "notifications-worker.js");
+  if (existsSync(srcNotificationsWorker)) {
+    ensureDir(WIKI_WORKER_DIR);
+    copyFileSync(srcNotificationsWorker, NOTIFICATIONS_WORKER_PATH);
+  }
+
 
   ensureDir(VERSION_DIR);
   writeVersionStamp(VERSION_DIR, getVersion());
